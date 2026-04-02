@@ -1,0 +1,18 @@
+# ignore compiling products
+build/
+*.exe
+*.obj
+*.o
+*.lib
+*.dll
+
+# ignore tokenizer and models
+*.bin
+stories*.bin
+tokenizer.bin
+
+# ignore vscode local environments
+.vscode/
+
+# ignore garbage
+.DS_Store
