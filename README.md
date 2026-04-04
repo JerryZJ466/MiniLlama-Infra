@@ -11,7 +11,7 @@ A minimal, pure C++ and CUDA-accelerated inference engine for the Llama 2 archit
 
 The engine has been mathematically aligned (strict Greedy Decoding) to ensure identical output between CPU and GPU implementations. Tested on a **110M parameter** model (Dim: 768, Layers: 12) generating a 226-token sequence.
 
-![Benchmark Proof](benchmark.png)
+![Benchmark Proof](benchmark_bar_chart.png)
 
 | Architecture | Precision | Hardware | Speed (tok/s) | Time (s) | Speedup |
 | :--- | :---: | :--- | :--- | :--- | :--- |
