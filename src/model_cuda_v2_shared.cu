@@ -24,13 +24,9 @@ void matmul(float* xout, float* x, float* w, int n, int d) {
     matmul_kernel<<<blocksPerGrid, threadsPerBlock>>>(xout, x, w, n, d);
 }
 
-// ... 之前的 matmul_kernel 保持不动 ...
-
 // ====================================================================
-// 👑 论文核心亮点：Warp-Level 并行与合并访存 (Coalesced Memory Access)
+// 👑 Warp-Level INT8 Group MatMul
 // ====================================================================
-
-// CUDA 官方推荐的 Warp 内规约原语
 __device__ inline float warpReduceSum(float val) {
     for (int offset = 16; offset > 0; offset /= 2)
         val += __shfl_down_sync(0xffffffff, val, offset);
@@ -38,23 +34,18 @@ __device__ inline float warpReduceSum(float val) {
 }
 
 __global__ void matmul_int8_group_kernel_v2(float* xout, float* x, int8_t* w_q, float* w_s, int n, int d, int group_size) {
-    // 💡 架构突变：现在是 32 个线程 (1个 Warp) 负责计算输出的一行
     int warp_id = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
-    int lane_id = threadIdx.x % 32; // 0 到 31
-    int row = warp_id;              // 当前 Warp 负责的行号
+    int lane_id = threadIdx.x % 32;
+    int row = warp_id;
 
     if (row < d) {
         float val = 0.0f;
         int groups_per_row = n / group_size;
 
-        // 遍历该行的所有组
         for (int g = 0; g < groups_per_row; g++) {
-            // 组共享的 Scale，Warp 里的 32 个线程读的都是同一个地址，触发广播机制 (极速)
             float scale = w_s[row * groups_per_row + g];
             int start_idx = row * n + g * group_size;
 
-            // 🚀 Warp 内的 32 个线程协同读取这一组的 64 个元素
-            // 线程 0 读 0,32; 线程 1 读 1,33... 绝对完美的连续内存访问！
             for (int j = lane_id; j < group_size; j += 32) {
                 int col = g * group_size + j;
                 float weight_fp32 = (float)w_q[start_idx + j] * scale;
@@ -62,10 +53,8 @@ __global__ void matmul_int8_group_kernel_v2(float* xout, float* x, int8_t* w_q, 
             }
         }
 
-        // 🚀 使用硬件原语，将 Warp 内 32 个线程的 val 闪电般加总
         val = warpReduceSum(val);
 
-        // 由 Warp 的第 0 号线程代表大家，把最终结果写入显存
         if (lane_id == 0) {
             xout[row] = val;
         }
@@ -74,20 +63,19 @@ __global__ void matmul_int8_group_kernel_v2(float* xout, float* x, int8_t* w_q, 
 
 void matmul_int8(float* xout, float* x, int8_t* w_q, float* w_s, int n, int d, int group_size) {
     int threadsPerBlock = 256;
-    // 既然 32 个线程算 1 行，那么 1 个 Block (256线程) 就能算 8 行
-    int rowsPerBlock = threadsPerBlock / 32; 
+    int rowsPerBlock = threadsPerBlock / 32;
     int blocksPerGrid = (d + rowsPerBlock - 1) / rowsPerBlock;
-    
     matmul_int8_group_kernel_v2<<<blocksPerGrid, threadsPerBlock>>>(xout, x, w_q, w_s, n, d, group_size);
 }
+
 // ====================================================================
-// 🚀 CUDA Kernel: RMSNorm & Softmax
+// 🚀 RMSNorm (独立版，用于循环首次和最终 norm)
 // ====================================================================
 __global__ void rmsnorm_kernel(float* o, float* x, float* weight, int size) {
     __shared__ float s_sum;
     int tid = threadIdx.x;
     if (tid == 0) s_sum = 0.0f;
-    __syncthreads(); 
+    __syncthreads();
     float local_sum = 0.0f;
     for (int i = tid; i < size; i += blockDim.x) {
         local_sum += x[i] * x[i];
@@ -101,10 +89,42 @@ __global__ void rmsnorm_kernel(float* o, float* x, float* weight, int size) {
 }
 
 void rmsnorm_cuda(float* o, float* x, float* weight, int size) {
-    int threads = (size < 1024) ? size : 1024; 
+    int threads = (size < 1024) ? size : 1024;
     rmsnorm_kernel<<<1, threads>>>(o, x, weight, size);
 }
 
+// ====================================================================
+// 🔥 融合算子: Add + RMSNorm (省掉一次全局显存读写)
+// ====================================================================
+__global__ void fused_add_rmsnorm_kernel(float* o, float* x, float* residual, float* weight, int size) {
+    __shared__ float s_sum;
+    int tid = threadIdx.x;
+    if (tid == 0) s_sum = 0.0f;
+    __syncthreads();
+
+    float local_sum = 0.0f;
+    for (int i = tid; i < size; i += blockDim.x) {
+        float val = x[i] + residual[i];
+        x[i] = val;
+        local_sum += val * val;
+    }
+    atomicAdd(&s_sum, local_sum);
+    __syncthreads();
+
+    float ss = 1.0f / sqrtf(s_sum / size + 1e-5f);
+    for (int i = tid; i < size; i += blockDim.x) {
+        o[i] = weight[i] * (ss * x[i]);
+    }
+}
+
+void fused_add_rmsnorm_cuda(float* o, float* x, float* residual, float* weight, int size) {
+    int threads = (size < 1024) ? size : 1024;
+    fused_add_rmsnorm_kernel<<<1, threads>>>(o, x, residual, weight, size);
+}
+
+// ====================================================================
+// 🚀 Softmax
+// ====================================================================
 __global__ void softmax_kernel(float* x, int size) {
     __shared__ float s_max;
     __shared__ float s_sum;
@@ -113,13 +133,13 @@ __global__ void softmax_kernel(float* x, int size) {
         float max_val = x[0];
         for (int i = 1; i < size; i++) if (x[i] > max_val) max_val = x[i];
         s_max = max_val;
-        s_sum = 0.0f; 
+        s_sum = 0.0f;
     }
     __syncthreads();
     if (tid < size) {
-        float val = expf(x[tid] - s_max); 
-        x[tid] = val;                     
-        atomicAdd(&s_sum, val);           
+        float val = expf(x[tid] - s_max);
+        x[tid] = val;
+        atomicAdd(&s_sum, val);
     }
     __syncthreads();
     if (tid < size) x[tid] = x[tid] / s_sum;
@@ -204,7 +224,6 @@ void alloc_gpu_state(RunStateGPU* s_gpu, Config* p) {
     cudaMalloc((void**)&s_gpu->value_cache, p->n_layers * p->seq_len * kv_dim * sizeof(float));
 }
 
-
 void free_gpu_state(RunStateGPU* s_gpu) {
     cudaFree(s_gpu->x); cudaFree(s_gpu->xb); cudaFree(s_gpu->xb2);
     cudaFree(s_gpu->hb); cudaFree(s_gpu->hb2);
@@ -236,7 +255,6 @@ __device__ float get_llama3_scaled_freq(int head_dim_idx, int head_size) {
     float freq = 1.0f / powf(500000.0f, (head_dim_idx * 2) / (float)head_size);
     float wavelength = 2.0f * 3.141592653589793f / freq;
     
-    // Llama 3.2 的缩放常数
     float factor = 32.0f;
     float low_freq_factor = 1.0f;
     float high_freq_factor = 4.0f;
@@ -255,15 +273,13 @@ __device__ float get_llama3_scaled_freq(int head_dim_idx, int head_size) {
 __global__ void rope_kernel(float* q, float* k, int pos, int dim, int kv_dim, int head_size) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     
-    // 旋转 Query
     if (i < dim) {
         int head_dim_idx = i % head_size;
-        // HuggingFace 格式：处理前半区并与后半区匹配
         if (head_dim_idx < head_size / 2) {
             float freq = get_llama3_scaled_freq(head_dim_idx, head_size);
             float val = pos * freq;
             float fcr = cosf(val), fci = sinf(val);
-            int pair_idx = i + head_size / 2; 
+            int pair_idx = i + head_size / 2;
             
             float q0 = q[i], q1 = q[pair_idx];
             q[i]        = q0 * fcr - q1 * fci;
@@ -271,14 +287,13 @@ __global__ void rope_kernel(float* q, float* k, int pos, int dim, int kv_dim, in
         }
     }
     
-    // 旋转 Key
     if (i < kv_dim) {
         int head_dim_idx = i % head_size;
         if (head_dim_idx < head_size / 2) {
             float freq = get_llama3_scaled_freq(head_dim_idx, head_size);
             float val = pos * freq;
             float fcr = cosf(val), fci = sinf(val);
-            int pair_idx = i + head_size / 2; 
+            int pair_idx = i + head_size / 2;
             
             float k0 = k[i], k1 = k[pair_idx];
             k[i]        = k0 * fcr - k1 * fci;
@@ -288,7 +303,7 @@ __global__ void rope_kernel(float* q, float* k, int pos, int dim, int kv_dim, in
 }
 
 __global__ void attention_query_key_kernel(float* att, float* q, float* key_cache, int head_size, int kv_dim, int kv_mul, int seq_len, int loff, int pos) {
-    int h = blockIdx.x; 
+    int h = blockIdx.x;
     for (int t = threadIdx.x; t <= pos; t += blockDim.x) {
         float* h_q = q + h * head_size;
         float* h_k = key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
@@ -304,7 +319,7 @@ __global__ void attention_value_kernel(float* xb, float* att, float* value_cache
         float val = 0.0f;
         for (int t = 0; t <= pos; t++) {
             float* h_v = value_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
-            float a = att[h * seq_len + t]; 
+            float a = att[h * seq_len + t];
             val += a * h_v[i];
         }
         xb[h * head_size + i] = val;
@@ -312,7 +327,7 @@ __global__ void attention_value_kernel(float* xb, float* att, float* value_cache
 }
 
 // ====================================================================
-// 🚀 Forward Pass (INT8)
+// 🚀 Forward Pass (INT8 + 融合算子)
 // ====================================================================
 float* forward_cuda(int token, int pos, Config* p, TransformerWeightsGPU* w, RunStateGPU* s) {
     int dim = p->dim; int hidden_dim = p->hidden_dim; int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
@@ -325,9 +340,10 @@ float* forward_cuda(int token, int pos, Config* p, TransformerWeightsGPU* w, Run
     cudaMemcpy(s->x, w->token_embedding_table + token * dim, dim * sizeof(float), cudaMemcpyDeviceToDevice);
 
     for (int l = 0; l < p->n_layers; l++) {
+        // Attention 前的 RMSNorm (第一层无法融合，因为前面没有 add)
         rmsnorm_cuda(s->xb, s->x, w->rms_att_weight + l * dim, dim);
         
-        // ⚡ 核心提速点：调用 INT8 矩阵乘
+        // Q K V MatMul (INT8)
         matmul_int8(s->q, s->xb, w->wq_q + l * dim * dim, w->wq_s + l * (dim * dim / gs), dim, dim, gs);
         matmul_int8(s->k, s->xb, w->wk_q + l * dim * kv_dim, w->wk_s + l * (dim * kv_dim / gs), dim, kv_dim, gs);
         matmul_int8(s->v, s->xb, w->wv_q + l * dim * kv_dim, w->wv_s + l * (dim * kv_dim / gs), dim, kv_dim, gs);
@@ -339,28 +355,29 @@ float* forward_cuda(int token, int pos, Config* p, TransformerWeightsGPU* w, Run
         cudaMemcpy(s->value_cache + loff + pos * kv_dim, s->v, kv_dim * sizeof(float), cudaMemcpyDeviceToDevice);
 
         attention_query_key_kernel<<<p->n_heads, 256>>>(s->att, s->q, s->key_cache, head_size, kv_dim, kv_mul, p->seq_len, loff, pos);
-        cudaDeviceSynchronize(); 
+        cudaDeviceSynchronize();
         for (int h = 0; h < p->n_heads; h++) softmax_cuda(s->att + h * p->seq_len, pos + 1);
         attention_value_kernel<<<p->n_heads, head_size>>>(s->xb, s->att, s->value_cache, head_size, kv_dim, kv_mul, p->seq_len, loff, pos);
         
         matmul_int8(s->xb2, s->xb, w->wo_q + l * dim * dim, w->wo_s + l * (dim * dim / gs), dim, dim, gs);
-        add_kernel<<<blocks_dim, threads>>>(s->x, s->xb2, dim);
 
-        rmsnorm_cuda(s->xb, s->x, w->rms_ffn_weight + l * dim, dim);
+        // 🔥 融合点 1: Add + RMSNorm (原来是两个 kernel，现在合成一个)
+        fused_add_rmsnorm_cuda(s->xb, s->x, s->xb2, w->rms_ffn_weight + l * dim, dim);
 
+        // FFN
         matmul_int8(s->hb, s->xb, w->w1_q + l * dim * hidden_dim, w->w1_s + l * (dim * hidden_dim / gs), dim, hidden_dim, gs);
         matmul_int8(s->hb2, s->xb, w->w3_q + l * dim * hidden_dim, w->w3_s + l * (dim * hidden_dim / gs), dim, hidden_dim, gs);
         silu_mul_kernel<<<blocks_hidden, threads>>>(s->hb, s->hb2, hidden_dim);
         
-        // ⚠️ 注意：w2 的输入是 hidden_dim，输出是 dim
         matmul_int8(s->xb, s->hb, w->w2_q + l * hidden_dim * dim, w->w2_s + l * (hidden_dim * dim / gs), hidden_dim, dim, gs);
 
-        add_kernel<<<blocks_dim, threads>>>(s->x, s->xb, dim); 
+        // 残差连接 (下一轮循环开头的 rmsnorm 会读 s->x)
+        add_kernel<<<blocks_dim, threads>>>(s->x, s->xb, dim);
     }
 
     rmsnorm_cuda(s->x, s->x, w->rms_final_weight, dim);
     
-    // ⚠️ 分类头保留 FP32 原生乘法，保护零样本精度
+    // 分类头保留 FP32
     matmul(s->logits, s->x, w->wcls, dim, p->vocab_size);
 
     return s->logits;
@@ -400,7 +417,7 @@ int sample_topp(float* logits, int size, float temperature, float topp) {
     for (int i = 0; i < size; i++) {
         cumulative_prob += probindex[i].prob;
         last_idx = i;
-        if (cumulative_prob >= topp) break; 
+        if (cumulative_prob >= topp) break;
     }
 
     float r = (float)rand() / (float)RAND_MAX * cumulative_prob;
@@ -410,6 +427,6 @@ int sample_topp(float* logits, int size, float temperature, float topp) {
         cdf += probindex[i].prob;
         if (r < cdf) { selected_token = probindex[i].index; break; }
     }
-    delete[] probindex; 
+    delete[] probindex;
     return selected_token;
 }
