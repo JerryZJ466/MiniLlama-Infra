@@ -1,6 +1,11 @@
+
+Llama-1B-local/
+llama.cpp/
 # 忽略所有模型权重文件
 *.bin
 
 # 忽略 C++ 编译产物目录
 build/
 *.exe
+*.gguf
+__pycache__/

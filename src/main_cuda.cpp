@@ -208,12 +208,28 @@ int main() {
     weights_cpu.rms_final_weight = (float*)byte_ptr; byte_ptr += dim * 4;
     weights_cpu.wcls = weights_cpu.token_embedding_table; 
 
-    // 3. VRAM 申请与跑分
+// 3. VRAM 申请与跑分
     std::cout << "📦 Allocating Static VRAM Pool for INT8..." << std::endl;
+
+    // 🌟 [新增] 探针 1：在申请显存前，查询 GPU 当前剩余显存
+    size_t free_mem_before, total_mem;
+    cudaMemGetInfo(&free_mem_before, &total_mem);
+
     TransformerWeightsGPU w_gpu;
     RunStateGPU s_gpu;
     alloc_gpu_weights(&w_gpu, &weights_cpu, &config);
     alloc_gpu_state(&s_gpu, &config);
+
+    // 🌟 [新增] 探针 2：在静态显存池分配完毕后，再次查询剩余显存
+    size_t free_mem_after, dummy_total;
+    cudaMemGetInfo(&free_mem_after, &dummy_total);
+
+    // 🌟 [新增] 计算精准的显存占用差值
+    double allocated_vram_mb = (free_mem_before - free_mem_after) / (1024.0 * 1024.0);
+    
+    std::cout << "==================================================" << std::endl;
+    std::cout << "🔥 MiniLlama-Infra 峰值专用显存占用 (Peak VRAM): " << allocated_vram_mb << " MB" << std::endl;
+    std::cout << "==================================================" << std::endl;
 
     float* cpu_logits = new float[config.vocab_size];
     std::vector<std::string> vocab = load_vocab(config.vocab_size);
