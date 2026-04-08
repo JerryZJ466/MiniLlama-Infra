@@ -11,16 +11,17 @@ struct TransformerWeights {
     float* token_embedding_table;
     float* rms_att_weight;
     
-    float* wq; 
-    float* wk; 
-    float* wv; 
-    float* wo; 
+    // 🔪 量化拆分：INT8 权重 (q) + FP32 缩放 (s)
+    int8_t* wq_q; float* wq_s;
+    int8_t* wk_q; float* wk_s;
+    int8_t* wv_q; float* wv_s;
+    int8_t* wo_q; float* wo_s;
     
     float* rms_ffn_weight;
     
-    float* w1; 
-    float* w2; 
-    float* w3; 
+    int8_t* w1_q; float* w1_s;
+    int8_t* w2_q; float* w2_s;
+    int8_t* w3_q; float* w3_s;
     
     float* rms_final_weight;
     float* wcls;
@@ -30,35 +31,24 @@ struct TransformerWeightsGPU {
     float* token_embedding_table;
     float* rms_att_weight;
     
-    float* wq; 
-    float* wk; 
-    float* wv; 
-    float* wo; 
+    int8_t* wq_q; float* wq_s;
+    int8_t* wk_q; float* wk_s;
+    int8_t* wv_q; float* wv_s;
+    int8_t* wo_q; float* wo_s;
     
     float* rms_ffn_weight;
     
-    float* w1; 
-    float* w2; 
-    float* w3; 
+    int8_t* w1_q; float* w1_s;
+    int8_t* w2_q; float* w2_s;
+    int8_t* w3_q; float* w3_s;
     
     float* rms_final_weight;
     float* wcls;
 };
 
 struct RunStateGPU {
-    float *x;      
-    float *xb;     
-    float *xb2;    
-    float *hb;     
-    float *hb2;    
-    float *q;      
-    float *k;      
-    float *v;      
-    float *att;    
-    float *logits; 
-    
-    float *key_cache;
-    float *value_cache;
+    float *x, *xb, *xb2, *hb, *hb2, *q, *k, *v, *att, *logits;
+    float *key_cache, *value_cache;
 };
 
 // ==========================================
@@ -66,6 +56,7 @@ struct RunStateGPU {
 // ==========================================
 void rmsnorm_cuda(float* o, float* x, float* weight, int size);
 void matmul(float* xout, float* x, float* w, int n, int d);
+void matmul_int8(float* xout, float* x, int8_t* w_q, float* w_s, int n, int d, int group_size); // 👈 新增声明
 void softmax_cuda(float* x, int size);
 
 float* forward_cuda(int token, int pos, Config* p, TransformerWeightsGPU* w, RunStateGPU* s);

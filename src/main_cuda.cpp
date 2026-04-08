@@ -140,47 +140,76 @@ void run_benchmark(Config* config, TransformerWeightsGPU* w_gpu, RunStateGPU* s_
     std::cout << "==================================================\n" << std::endl;
 }
 
+// ... 保持上面的 run_benchmark 不变 ...
+
 // ====================================================================
 // 🖥️ 主函数
 // ====================================================================
 int main() {
     SetConsoleOutputCP(CP_UTF8);
-    std::cout << "🚀 Mini-Llama FP32 CUDA Engine Starting..." << std::endl;
+    std::cout << "🚀 Mini-Llama INT8 Group-wise CUDA Engine Starting..." << std::endl;
 
-    // 1. 读取模型
-    HANDLE hFile = CreateFileA("llama3_2_1B.bin", GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) { std::cout << "❌ Error: Cannot find llama3_2_1B.bin" << std::endl; return 1; }
+    // 1. 读取量化后的模型文件
+    HANDLE hFile = CreateFileA("llama3_2_1B_q8_group.bin", GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) { std::cout << "❌ Error: Cannot find llama3_2_1B_q8_group.bin" << std::endl; return 1; }
     HANDLE hMap = CreateFileMappingA(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
     float* data = (float*)MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
 
     Config config;
-    memcpy(&config, data, sizeof(Config));
-    config.seq_len = 1024; // 限制最大显存边界
+    memcpy(&config, data, 28); // 读取前 28 字节头部
+    config.seq_len = 1024;
+    config.group_size = 64;    // 👑 强行注入我们在 Python 里设置的 Group Size
 
-    std::cout << "🧠 Model Loaded | Parameters: 1B (PURE FP32) | Dim: " << config.dim << std::endl;
+    std::cout << "🧠 Model Loaded | Parameters: 1B (INT8 Group-64) | Dim: " << config.dim << std::endl;
 
-    // 2. 指针偏移映射
+    // 2. ⚡ 极其硬核的内存映射：解析 [Scale] + [INT8 Weight] 的内存块
     TransformerWeights weights_cpu;
-    char* byte_ptr = (char*)(data + 7); 
+    char* byte_ptr = (char*)(data + 7); // 跳过 28 字节 config
     int dim = config.dim;
     int hidden_dim = config.hidden_dim;
     int kv_dim = (config.dim * config.n_kv_heads) / config.n_heads;
+    int gs = config.group_size;
 
     weights_cpu.token_embedding_table = (float*)byte_ptr; byte_ptr += config.vocab_size * dim * 4;
     weights_cpu.rms_att_weight = (float*)byte_ptr; byte_ptr += config.n_layers * dim * 4;
-    weights_cpu.wq = (float*)byte_ptr; byte_ptr += config.n_layers * dim * dim * 4;
-    weights_cpu.wk = (float*)byte_ptr; byte_ptr += config.n_layers * dim * kv_dim * 4;
-    weights_cpu.wv = (float*)byte_ptr; byte_ptr += config.n_layers * dim * kv_dim * 4;
-    weights_cpu.wo = (float*)byte_ptr; byte_ptr += config.n_layers * dim * dim * 4;
+
+    // 🔪 wq
+    int wq_elems = config.n_layers * dim * dim;
+    weights_cpu.wq_s = (float*)byte_ptr; byte_ptr += (wq_elems / gs) * 4;
+    weights_cpu.wq_q = (int8_t*)byte_ptr; byte_ptr += wq_elems * 1;
+    // 🔪 wk
+    int wk_elems = config.n_layers * dim * kv_dim;
+    weights_cpu.wk_s = (float*)byte_ptr; byte_ptr += (wk_elems / gs) * 4;
+    weights_cpu.wk_q = (int8_t*)byte_ptr; byte_ptr += wk_elems * 1;
+    // 🔪 wv
+    int wv_elems = config.n_layers * dim * kv_dim;
+    weights_cpu.wv_s = (float*)byte_ptr; byte_ptr += (wv_elems / gs) * 4;
+    weights_cpu.wv_q = (int8_t*)byte_ptr; byte_ptr += wv_elems * 1;
+    // 🔪 wo
+    int wo_elems = config.n_layers * dim * dim;
+    weights_cpu.wo_s = (float*)byte_ptr; byte_ptr += (wo_elems / gs) * 4;
+    weights_cpu.wo_q = (int8_t*)byte_ptr; byte_ptr += wo_elems * 1;
+
     weights_cpu.rms_ffn_weight = (float*)byte_ptr; byte_ptr += config.n_layers * dim * 4;
-    weights_cpu.w1 = (float*)byte_ptr; byte_ptr += config.n_layers * dim * hidden_dim * 4;
-    weights_cpu.w2 = (float*)byte_ptr; byte_ptr += config.n_layers * hidden_dim * dim * 4;
-    weights_cpu.w3 = (float*)byte_ptr; byte_ptr += config.n_layers * dim * hidden_dim * 4;
+
+    // 🔪 w1
+    int w1_elems = config.n_layers * dim * hidden_dim;
+    weights_cpu.w1_s = (float*)byte_ptr; byte_ptr += (w1_elems / gs) * 4;
+    weights_cpu.w1_q = (int8_t*)byte_ptr; byte_ptr += w1_elems * 1;
+    // 🔪 w2
+    int w2_elems = config.n_layers * hidden_dim * dim;
+    weights_cpu.w2_s = (float*)byte_ptr; byte_ptr += (w2_elems / gs) * 4;
+    weights_cpu.w2_q = (int8_t*)byte_ptr; byte_ptr += w2_elems * 1;
+    // 🔪 w3
+    int w3_elems = config.n_layers * dim * hidden_dim;
+    weights_cpu.w3_s = (float*)byte_ptr; byte_ptr += (w3_elems / gs) * 4;
+    weights_cpu.w3_q = (int8_t*)byte_ptr; byte_ptr += w3_elems * 1;
+
     weights_cpu.rms_final_weight = (float*)byte_ptr; byte_ptr += dim * 4;
     weights_cpu.wcls = weights_cpu.token_embedding_table; 
 
-    // 3. VRAM 申请
-    std::cout << "📦 Allocating Static VRAM Pool..." << std::endl;
+    // 3. VRAM 申请与跑分
+    std::cout << "📦 Allocating Static VRAM Pool for INT8..." << std::endl;
     TransformerWeightsGPU w_gpu;
     RunStateGPU s_gpu;
     alloc_gpu_weights(&w_gpu, &weights_cpu, &config);
@@ -189,10 +218,9 @@ int main() {
     float* cpu_logits = new float[config.vocab_size];
     std::vector<std::string> vocab = load_vocab(config.vocab_size);
 
-    // 4. 🚀 启动跑分
     run_benchmark(&config, &w_gpu, &s_gpu, vocab, cpu_logits);
     
-    // 5. 释放资源
+    // 4. 释放资源
     free_gpu_weights(&w_gpu);
     free_gpu_state(&s_gpu);
     delete[] cpu_logits;

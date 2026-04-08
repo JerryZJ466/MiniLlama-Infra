@@ -24,6 +24,62 @@ void matmul(float* xout, float* x, float* w, int n, int d) {
     matmul_kernel<<<blocksPerGrid, threadsPerBlock>>>(xout, x, w, n, d);
 }
 
+// ... 之前的 matmul_kernel 保持不动 ...
+
+// ====================================================================
+// 👑 论文核心亮点：Warp-Level 并行与合并访存 (Coalesced Memory Access)
+// ====================================================================
+
+// CUDA 官方推荐的 Warp 内规约原语
+__device__ inline float warpReduceSum(float val) {
+    for (int offset = 16; offset > 0; offset /= 2)
+        val += __shfl_down_sync(0xffffffff, val, offset);
+    return val;
+}
+
+__global__ void matmul_int8_group_kernel_v2(float* xout, float* x, int8_t* w_q, float* w_s, int n, int d, int group_size) {
+    // 💡 架构突变：现在是 32 个线程 (1个 Warp) 负责计算输出的一行
+    int warp_id = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+    int lane_id = threadIdx.x % 32; // 0 到 31
+    int row = warp_id;              // 当前 Warp 负责的行号
+
+    if (row < d) {
+        float val = 0.0f;
+        int groups_per_row = n / group_size;
+
+        // 遍历该行的所有组
+        for (int g = 0; g < groups_per_row; g++) {
+            // 组共享的 Scale，Warp 里的 32 个线程读的都是同一个地址，触发广播机制 (极速)
+            float scale = w_s[row * groups_per_row + g];
+            int start_idx = row * n + g * group_size;
+
+            // 🚀 Warp 内的 32 个线程协同读取这一组的 64 个元素
+            // 线程 0 读 0,32; 线程 1 读 1,33... 绝对完美的连续内存访问！
+            for (int j = lane_id; j < group_size; j += 32) {
+                int col = g * group_size + j;
+                float weight_fp32 = (float)w_q[start_idx + j] * scale;
+                val += weight_fp32 * x[col];
+            }
+        }
+
+        // 🚀 使用硬件原语，将 Warp 内 32 个线程的 val 闪电般加总
+        val = warpReduceSum(val);
+
+        // 由 Warp 的第 0 号线程代表大家，把最终结果写入显存
+        if (lane_id == 0) {
+            xout[row] = val;
+        }
+    }
+}
+
+void matmul_int8(float* xout, float* x, int8_t* w_q, float* w_s, int n, int d, int group_size) {
+    int threadsPerBlock = 256;
+    // 既然 32 个线程算 1 行，那么 1 个 Block (256线程) 就能算 8 行
+    int rowsPerBlock = threadsPerBlock / 32; 
+    int blocksPerGrid = (d + rowsPerBlock - 1) / rowsPerBlock;
+    
+    matmul_int8_group_kernel_v2<<<blocksPerGrid, threadsPerBlock>>>(xout, x, w_q, w_s, n, d, group_size);
+}
 // ====================================================================
 // 🚀 CUDA Kernel: RMSNorm & Softmax
 // ====================================================================
@@ -74,40 +130,62 @@ void softmax_cuda(float* x, int size) {
 }
 
 // ====================================================================
-// 📦 GPU VRAM Management (PURE FP32)
+// 📦 GPU VRAM Management (INT8 Group-wise)
 // ====================================================================
 void alloc_gpu_weights(TransformerWeightsGPU* w_gpu, TransformerWeights* w_cpu, Config* p) {
     int dim = p->dim; int hidden_dim = p->hidden_dim; int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
+    int gs = p->group_size;
 
-    // 1. 申请纯 FP32 显存 (* 4 字节)
     cudaMalloc((void**)&w_gpu->token_embedding_table, p->vocab_size * dim * 4);
     cudaMalloc((void**)&w_gpu->rms_att_weight, p->n_layers * dim * 4);
-    cudaMalloc((void**)&w_gpu->wq, p->n_layers * dim * dim * 4);
-    cudaMalloc((void**)&w_gpu->wk, p->n_layers * dim * kv_dim * 4);
-    cudaMalloc((void**)&w_gpu->wv, p->n_layers * dim * kv_dim * 4);
-    cudaMalloc((void**)&w_gpu->wo, p->n_layers * dim * dim * 4);
+    
+    int wq_elems = p->n_layers * dim * dim;
+    cudaMalloc((void**)&w_gpu->wq_s, (wq_elems / gs) * 4); cudaMalloc((void**)&w_gpu->wq_q, wq_elems * 1);
+    int wk_elems = p->n_layers * dim * kv_dim;
+    cudaMalloc((void**)&w_gpu->wk_s, (wk_elems / gs) * 4); cudaMalloc((void**)&w_gpu->wk_q, wk_elems * 1);
+    int wv_elems = p->n_layers * dim * kv_dim;
+    cudaMalloc((void**)&w_gpu->wv_s, (wv_elems / gs) * 4); cudaMalloc((void**)&w_gpu->wv_q, wv_elems * 1);
+    int wo_elems = p->n_layers * dim * dim;
+    cudaMalloc((void**)&w_gpu->wo_s, (wo_elems / gs) * 4); cudaMalloc((void**)&w_gpu->wo_q, wo_elems * 1);
+
     cudaMalloc((void**)&w_gpu->rms_ffn_weight, p->n_layers * dim * 4);
-    cudaMalloc((void**)&w_gpu->w1, p->n_layers * dim * hidden_dim * 4);
-    cudaMalloc((void**)&w_gpu->w2, p->n_layers * hidden_dim * dim * 4);
-    cudaMalloc((void**)&w_gpu->w3, p->n_layers * dim * hidden_dim * 4);
+
+    int w1_elems = p->n_layers * dim * hidden_dim;
+    cudaMalloc((void**)&w_gpu->w1_s, (w1_elems / gs) * 4); cudaMalloc((void**)&w_gpu->w1_q, w1_elems * 1);
+    int w2_elems = p->n_layers * hidden_dim * dim;
+    cudaMalloc((void**)&w_gpu->w2_s, (w2_elems / gs) * 4); cudaMalloc((void**)&w_gpu->w2_q, w2_elems * 1);
+    int w3_elems = p->n_layers * dim * hidden_dim;
+    cudaMalloc((void**)&w_gpu->w3_s, (w3_elems / gs) * 4); cudaMalloc((void**)&w_gpu->w3_q, w3_elems * 1);
+
     cudaMalloc((void**)&w_gpu->rms_final_weight, dim * 4);
     
-    // 2. 拷贝 FP32 权重到显卡
     cudaMemcpy(w_gpu->token_embedding_table, w_cpu->token_embedding_table, p->vocab_size * dim * 4, cudaMemcpyHostToDevice);
     cudaMemcpy(w_gpu->rms_att_weight, w_cpu->rms_att_weight, p->n_layers * dim * 4, cudaMemcpyHostToDevice);
-    cudaMemcpy(w_gpu->wq, w_cpu->wq, p->n_layers * dim * dim * 4, cudaMemcpyHostToDevice);
-    cudaMemcpy(w_gpu->wk, w_cpu->wk, p->n_layers * dim * kv_dim * 4, cudaMemcpyHostToDevice);
-    cudaMemcpy(w_gpu->wv, w_cpu->wv, p->n_layers * dim * kv_dim * 4, cudaMemcpyHostToDevice);
-    cudaMemcpy(w_gpu->wo, w_cpu->wo, p->n_layers * dim * dim * 4, cudaMemcpyHostToDevice);
+    
+    cudaMemcpy(w_gpu->wq_s, w_cpu->wq_s, (wq_elems / gs) * 4, cudaMemcpyHostToDevice); cudaMemcpy(w_gpu->wq_q, w_cpu->wq_q, wq_elems * 1, cudaMemcpyHostToDevice);
+    cudaMemcpy(w_gpu->wk_s, w_cpu->wk_s, (wk_elems / gs) * 4, cudaMemcpyHostToDevice); cudaMemcpy(w_gpu->wk_q, w_cpu->wk_q, wk_elems * 1, cudaMemcpyHostToDevice);
+    cudaMemcpy(w_gpu->wv_s, w_cpu->wv_s, (wv_elems / gs) * 4, cudaMemcpyHostToDevice); cudaMemcpy(w_gpu->wv_q, w_cpu->wv_q, wv_elems * 1, cudaMemcpyHostToDevice);
+    cudaMemcpy(w_gpu->wo_s, w_cpu->wo_s, (wo_elems / gs) * 4, cudaMemcpyHostToDevice); cudaMemcpy(w_gpu->wo_q, w_cpu->wo_q, wo_elems * 1, cudaMemcpyHostToDevice);
+
     cudaMemcpy(w_gpu->rms_ffn_weight, w_cpu->rms_ffn_weight, p->n_layers * dim * 4, cudaMemcpyHostToDevice);
-    cudaMemcpy(w_gpu->w1, w_cpu->w1, p->n_layers * dim * hidden_dim * 4, cudaMemcpyHostToDevice);
-    cudaMemcpy(w_gpu->w2, w_cpu->w2, p->n_layers * hidden_dim * dim * 4, cudaMemcpyHostToDevice);
-    cudaMemcpy(w_gpu->w3, w_cpu->w3, p->n_layers * dim * hidden_dim * 4, cudaMemcpyHostToDevice);
+
+    cudaMemcpy(w_gpu->w1_s, w_cpu->w1_s, (w1_elems / gs) * 4, cudaMemcpyHostToDevice); cudaMemcpy(w_gpu->w1_q, w_cpu->w1_q, w1_elems * 1, cudaMemcpyHostToDevice);
+    cudaMemcpy(w_gpu->w2_s, w_cpu->w2_s, (w2_elems / gs) * 4, cudaMemcpyHostToDevice); cudaMemcpy(w_gpu->w2_q, w_cpu->w2_q, w2_elems * 1, cudaMemcpyHostToDevice);
+    cudaMemcpy(w_gpu->w3_s, w_cpu->w3_s, (w3_elems / gs) * 4, cudaMemcpyHostToDevice); cudaMemcpy(w_gpu->w3_q, w_cpu->w3_q, w3_elems * 1, cudaMemcpyHostToDevice);
+
     cudaMemcpy(w_gpu->rms_final_weight, w_cpu->rms_final_weight, dim * 4, cudaMemcpyHostToDevice);
     
-    // 🚀 复用 wcls 指针
     w_gpu->wcls = w_gpu->token_embedding_table;
     cudaDeviceSynchronize();
+}
+
+void free_gpu_weights(TransformerWeightsGPU* w) {
+    cudaFree(w->token_embedding_table); cudaFree(w->rms_att_weight);
+    cudaFree(w->wq_q); cudaFree(w->wq_s); cudaFree(w->wk_q); cudaFree(w->wk_s);
+    cudaFree(w->wv_q); cudaFree(w->wv_s); cudaFree(w->wo_q); cudaFree(w->wo_s);
+    cudaFree(w->rms_ffn_weight);
+    cudaFree(w->w1_q); cudaFree(w->w1_s); cudaFree(w->w2_q); cudaFree(w->w2_s);
+    cudaFree(w->w3_q); cudaFree(w->w3_s); cudaFree(w->rms_final_weight);
 }
 
 void alloc_gpu_state(RunStateGPU* s_gpu, Config* p) {
@@ -126,13 +204,6 @@ void alloc_gpu_state(RunStateGPU* s_gpu, Config* p) {
     cudaMalloc((void**)&s_gpu->value_cache, p->n_layers * p->seq_len * kv_dim * sizeof(float));
 }
 
-void free_gpu_weights(TransformerWeightsGPU* w_gpu) {
-    cudaFree(w_gpu->token_embedding_table); cudaFree(w_gpu->rms_att_weight);
-    cudaFree(w_gpu->wq); cudaFree(w_gpu->wk); cudaFree(w_gpu->wv); cudaFree(w_gpu->wo);
-    cudaFree(w_gpu->rms_ffn_weight);
-    cudaFree(w_gpu->w1); cudaFree(w_gpu->w2); cudaFree(w_gpu->w3);
-    cudaFree(w_gpu->rms_final_weight);
-}
 
 void free_gpu_state(RunStateGPU* s_gpu) {
     cudaFree(s_gpu->x); cudaFree(s_gpu->xb); cudaFree(s_gpu->xb2);
@@ -241,11 +312,12 @@ __global__ void attention_value_kernel(float* xb, float* att, float* value_cache
 }
 
 // ====================================================================
-// 🚀 Forward Pass (FP32)
+// 🚀 Forward Pass (INT8)
 // ====================================================================
 float* forward_cuda(int token, int pos, Config* p, TransformerWeightsGPU* w, RunStateGPU* s) {
     int dim = p->dim; int hidden_dim = p->hidden_dim; int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
     int kv_mul = p->n_heads / p->n_kv_heads; int head_size = dim / p->n_heads;
+    int gs = p->group_size;
     int threads = 256;
     int blocks_dim = (dim + threads - 1) / threads;
     int blocks_hidden = (hidden_dim + threads - 1) / threads;
@@ -255,9 +327,10 @@ float* forward_cuda(int token, int pos, Config* p, TransformerWeightsGPU* w, Run
     for (int l = 0; l < p->n_layers; l++) {
         rmsnorm_cuda(s->xb, s->x, w->rms_att_weight + l * dim, dim);
         
-        matmul(s->q, s->xb, w->wq + l * dim * dim, dim, dim);
-        matmul(s->k, s->xb, w->wk + l * dim * kv_dim, dim, kv_dim);
-        matmul(s->v, s->xb, w->wv + l * dim * kv_dim, dim, kv_dim);
+        // ⚡ 核心提速点：调用 INT8 矩阵乘
+        matmul_int8(s->q, s->xb, w->wq_q + l * dim * dim, w->wq_s + l * (dim * dim / gs), dim, dim, gs);
+        matmul_int8(s->k, s->xb, w->wk_q + l * dim * kv_dim, w->wk_s + l * (dim * kv_dim / gs), dim, kv_dim, gs);
+        matmul_int8(s->v, s->xb, w->wv_q + l * dim * kv_dim, w->wv_s + l * (dim * kv_dim / gs), dim, kv_dim, gs);
 
         rope_kernel<<<blocks_dim, threads>>>(s->q, s->k, pos, dim, kv_dim, head_size);
 
@@ -270,20 +343,24 @@ float* forward_cuda(int token, int pos, Config* p, TransformerWeightsGPU* w, Run
         for (int h = 0; h < p->n_heads; h++) softmax_cuda(s->att + h * p->seq_len, pos + 1);
         attention_value_kernel<<<p->n_heads, head_size>>>(s->xb, s->att, s->value_cache, head_size, kv_dim, kv_mul, p->seq_len, loff, pos);
         
-        matmul(s->xb2, s->xb, w->wo + l * dim * dim, dim, dim);
+        matmul_int8(s->xb2, s->xb, w->wo_q + l * dim * dim, w->wo_s + l * (dim * dim / gs), dim, dim, gs);
         add_kernel<<<blocks_dim, threads>>>(s->x, s->xb2, dim);
 
         rmsnorm_cuda(s->xb, s->x, w->rms_ffn_weight + l * dim, dim);
 
-        matmul(s->hb, s->xb, w->w1 + l * dim * hidden_dim, dim, hidden_dim);
-        matmul(s->hb2, s->xb, w->w3 + l * dim * hidden_dim, dim, hidden_dim);
+        matmul_int8(s->hb, s->xb, w->w1_q + l * dim * hidden_dim, w->w1_s + l * (dim * hidden_dim / gs), dim, hidden_dim, gs);
+        matmul_int8(s->hb2, s->xb, w->w3_q + l * dim * hidden_dim, w->w3_s + l * (dim * hidden_dim / gs), dim, hidden_dim, gs);
         silu_mul_kernel<<<blocks_hidden, threads>>>(s->hb, s->hb2, hidden_dim);
-        matmul(s->xb, s->hb, w->w2 + l * dim * hidden_dim, hidden_dim, dim);
+        
+        // ⚠️ 注意：w2 的输入是 hidden_dim，输出是 dim
+        matmul_int8(s->xb, s->hb, w->w2_q + l * hidden_dim * dim, w->w2_s + l * (hidden_dim * dim / gs), hidden_dim, dim, gs);
 
         add_kernel<<<blocks_dim, threads>>>(s->x, s->xb, dim); 
     }
 
     rmsnorm_cuda(s->x, s->x, w->rms_final_weight, dim);
+    
+    // ⚠️ 分类头保留 FP32 原生乘法，保护零样本精度
     matmul(s->logits, s->x, w->wcls, dim, p->vocab_size);
 
     return s->logits;

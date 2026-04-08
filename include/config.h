@@ -5,9 +5,8 @@
 struct Config {
     int dim; int hidden_dim; int n_layers; int n_heads;
     int n_kv_heads; int vocab_size; int seq_len;
+    int group_size; // 👈 新增：记录量化分组大小
 };
-
-
 
 // Runtime state and activation buffers
 struct RunState {
