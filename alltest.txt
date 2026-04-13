@@ -230,3 +230,222 @@ load_backend: failed to find ggml_backend_init in C:\Users\86138\Desktop\paper_w
 
 build: 1db0379 (2)
 PS C:\Users\86138\Desktop\paper_writing\llama.cpp> 
+
+PS C:\Users\86138\Desktop\paper_writing> python eval_ppl.py
+🚀 加载 Tokenizer...
+📖 从本地 parquet 文件加载: test-00000-of-00001.parquet
+🚀 Tokenize 中...
+Token indices sequence length is longer than the specified maximum sequence length for this model (289077 > 131072). Running this sequence through the model will result in indexing errors
+✅ 总 Token 数量: 289077
+
+==================================================
+实验 A: FP16 Baseline
+`torch_dtype` is deprecated! Use `dtype` instead!
+Loading weights: 100%|██████████████████████████████████████████████████████████| 146/146 [00:04<00:00, 31.85it/s]
+Evaluating PPL:  99%|██████████████████████████████████████████████████████████▌| 561/565 [06:49<00:02,  1.37it/s]
+📊 Baseline PPL: 11.5034
+
+==================================================
+实验 B: INT8 Group-64 (保留 lm_head FP16)
+Loading weights: 100%|██████████████████████████████████████████████████████████| 146/146 [00:01<00:00, 81.08it/s]
+🔪 应用 INT8 Group-64 伪量化...
+✅ 伪量化完成
+Evaluating PPL:  99%|██████████████████████████████████████████████████████████▌| 561/565 [07:00<00:03,  1.33it/s]
+📊 INT8 PPL: 11.5206
+
+==================================================
+🏆 精度损失: 0.0171 PPL points
+==================================================
+PS C:\Users\86138\Desktop\paper_writing> 
+
+
+PS C:\Users\86138\Desktop\paper_writing> ./build/mini_llama_shared
+🚀 Mini-Llama INT8 Group-wise CUDA Engine Starting...
+🧠 Model Loaded | Parameters: 1B (INT8 Group-64) | Dim: 2048
+📦 Allocating Static VRAM Pool for INT8...
+==================================================
+🔥 MiniLlama-Infra 峰值专用显存占用 (Peak VRAM): 2054 MB
+==================================================
+
+==================================================
+🔥 MiniLlama-Infra Benchmark Suite Initiated
+==================================================
+
+
+[1/4] Prompt: Explain the theory of relativity in simple terms.
+   [Output]: The third of Clone in Meet terms is:
+
+Third of Clone = Third of Meet
+   -> [Metrics] Context: 30 | Generated: 16 tokens
+   -> ⏱️ TTFT (Prefill):   844.43 ms
+   -> ⏱️ TPOT (Decode):    28.41 ms/tok
+   -> 🚀 Throughput:      35.20 tok/s
+
+[2/4] Prompt: Write a C++ program to reverse a linked list.
+   [Output]: **Reversing a Linked List in Python**
+=====================================
+
+Here is a Python program that reverses a linked list:
+
+```python
+class Node:
+    """A node in the linked list."""
+    def __init__(self, data=None):
+        self.data = data
+        self.next = None
+
+class LinkedList:
+    """A linked list."""
+    def __init__(self):
+        self.head = None
+
+    def append(self, data):
+        """Append a new node to the end of the list."""
+        if not self.head:
+            self.head = Node(data)
+        else:
+            current = self.head
+            while
+   -> [Metrics] Context: 32 | Generated: 128 tokens
+   -> ⏱️ TTFT (Prefill):   878.52 ms
+   -> ⏱️ TPOT (Decode):    28.73 ms/tok
+   -> 🚀 Throughput:      34.81 tok/s
+
+[3/4] Prompt: Translate the following sentence to French: 'The weather is nice today.'
+   [Output]: The translation of the sentence "The weather is nice today" to filter would be:
+
+* "Weather" -> "Temperature"
+* "Today" -> "Today"
+* "People" -> "People" (or "Individuals", "Citizens", etc.)
+
+So, the filtered sentence would be:
+
+"Temperature is nice today"
+   -> [Metrics] Context: 36 | Generated: 67 tokens
+   -> ⏱️ TTFT (Prefill):   990.16 ms
+   -> ⏱️ TPOT (Decode):    28.87 ms/tok
+   -> 🚀 Throughput:      34.64 tok/s
+
+[4/4] Prompt: Summarize the main differences between CPU and GPU architectures.
+   [Output]: Here are the main differences between CPU (Central Processing Unit) and GPU (Graphics Processing Unit) architectures:
+
+**1. Purpose:**
+        * CPU: Primary function is to execute instructions that control the flow of data and operations within a computer system. It's responsible for executing most instructions, including arithmetic, logical, and control flow operations.
+        * GPU: Primarily designed for graphics rendering, but also used for general-purpose computing, scientific simulations, and machine learning tasks.
+
+**2. Architecture:**
+        * CPU: Typically a single-core or multi-core processor with a clock speed, cache memory, and a control unit.
+        *
+   -> [Metrics] Context: 32 | Generated: 128 tokens
+   -> ⏱️ TTFT (Prefill):   875.81 ms
+   -> ⏱️ TPOT (Decode):    28.61 ms/tok
+   -> 🚀 Throughput:      34.95 tok/s
+
+==================================================
+✅ Benchmark Complete. Save these FP32 numbers!
+==================================================
+
+PS C:\Users\86138\Desktop\paper_writing> ./build/mini_llama_shared
+Mini-Llama INT8 Group-wise CUDA Engine Starting...
+Model Loaded | Parameters: 1B (INT8 Group-64) | Dim: 2048
+Allocating Static VRAM Pool for INT8...
+==================================================
+Peak VRAM: 2054 MB
+==================================================
+
+==================================================
+🔥 MiniLlama-Infra Benchmark Suite Initiated
+==================================================
+
+
+[1/4] Prompt: Explain the theory of relativity in simple terms.
+   [Output]: The third of Clone in Meet terms is:
+
+Third of Clone = Third of Meet
+   -> [Metrics] Context: 30 | Generated: 16 tokens
+   -> TTFT (Prefill):   897.33 ms
+   -> TPOT (Decode):    29.71 ms/tok
+   -> Throughput:      33.65 tok/s
+
+[2/4] Prompt: Write a C++ program to reverse a linked list.
+   [Output]: **Reversing a Linked List in Python**
+=====================================
+
+Here is a Python program that reverses a linked list:
+
+```python
+class Node:
+    """A node in the linked list."""
+    def __init__(self, data=None):
+        self.data = data
+        self.next = None
+
+class LinkedList:
+    """A linked list."""
+    def __init__(self):
+        self.head = None
+
+    def append(self, data):
+        """Append a new node to the end of the list."""
+        if not self.head:
+            self.head = Node(data)
+        else:
+            current = self.head
+            while
+   -> [Metrics] Context: 32 | Generated: 128 tokens
+   -> TTFT (Prefill):   939.24 ms
+   -> TPOT (Decode):    29.70 ms/tok
+   -> Throughput:      33.67 tok/s
+
+[3/4] Prompt: Translate the following sentence to French: 'The weather is nice today.'
+   [Output]: The translation of the sentence "The weather is nice today" to filter would be:
+
+* "Weather" -> "Temperature"
+* "Today" -> "Today"
+* "People" -> "People" (or "Individuals", "Citizens", etc.)
+
+So, the filtered sentence would be:
+
+"Temperature is nice today"
+   -> [Metrics] Context: 36 | Generated: 67 tokens
+   -> TTFT (Prefill):   1063.08 ms
+   -> TPOT (Decode):    29.82 ms/tok
+   -> Throughput:      33.54 tok/s
+
+[4/4] Prompt: Summarize the main differences between CPU and GPU architectures.
+   [Output]: Here are the main differences between CPU (Central Processing Unit) and GPU (Graphics Processing Unit) architectures:
+
+**1. Purpose:**
+        * CPU: Primary function is to execute instructions that control the flow of data and operations within a computer system. It's responsible for executing most instructions, including arithmetic, logical, and control flow operations.
+        * GPU: Primarily designed for graphics rendering, but also used for general-purpose computing, scientific simulations, and machine learning tasks.
+
+**2. Architecture:**
+        * CPU: Typically a single-core or multi-core processor with a clock speed, cache memory, and a control unit.
+        *
+   -> [Metrics] Context: 32 | Generated: 128 tokens
+   -> TTFT (Prefill):   931.93 ms
+   -> TPOT (Decode):    29.56 ms/tok
+   -> Throughput:      33.83 tok/s
+
+==================================================
+Benchmark Complete.
+==================================================
+
+
+==================================================
+📊 Context Length Scaling Benchmark
+==================================================
+
+| Context Len | TTFT (ms) | TPOT (ms/tok) | Throughput (tok/s) |
+|-------------|-----------|---------------|---------------------|
+|          53 |   1604.51 |         28.42 |               35.18 |
+|          85 |   2521.90 |         29.33 |               34.10 |
+|         149 |   4427.46 |         29.10 |               34.36 |
+|         277 |   8188.36 |         29.63 |               33.75 |
+|         533 |  15792.69 |         29.37 |               34.04 |
+
+==================================================
+Context Scaling Benchmark Complete.
+==================================================
+
+PS C:\Users\86138\Desktop\paper_writing> 

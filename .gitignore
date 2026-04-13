@@ -1,11 +1,36 @@
 
-Llama-1B-local/
-llama.cpp/
-# 忽略所有模型权重文件
+# Model weights and binary data
 *.bin
+*.gguf
+*.parquet
 
-# 忽略 C++ 编译产物目录
+# Compiled output
 build/
 *.exe
-*.gguf
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+
+# NSight Compute binary reports (large)
+*.ncu-rep
+
+# Python
 __pycache__/
+*.pyc
+
+# Large external dependencies
+Llama-1B-local/
+llama.cpp/
+
+# Tokenizer binary (download separately)
+tokenizer.bin
+
+# Dataset files (download via eval_ppl.py)
+wikitext2_test.txt
+
+# Empty/unused files
+model_cuda_v4_flash.cu

@@ -69,7 +69,7 @@ void matmul_int8(float* xout, float* x, int8_t* w_q, float* w_s, int n, int d, i
 }
 
 // ====================================================================
-// 🚀 RMSNorm (独立版，用于循环首次和最终 norm)
+// 🚀 RMSNorm (独立版)
 // ====================================================================
 __global__ void rmsnorm_kernel(float* o, float* x, float* weight, int size) {
     __shared__ float s_sum;
@@ -94,7 +94,7 @@ void rmsnorm_cuda(float* o, float* x, float* weight, int size) {
 }
 
 // ====================================================================
-// 🔥 融合算子: Add + RMSNorm (省掉一次全局显存读写)
+// 🔥 融合算子: Add + RMSNorm
 // ====================================================================
 __global__ void fused_add_rmsnorm_kernel(float* o, float* x, float* residual, float* weight, int size) {
     __shared__ float s_sum;
@@ -120,33 +120,6 @@ __global__ void fused_add_rmsnorm_kernel(float* o, float* x, float* residual, fl
 void fused_add_rmsnorm_cuda(float* o, float* x, float* residual, float* weight, int size) {
     int threads = (size < 1024) ? size : 1024;
     fused_add_rmsnorm_kernel<<<1, threads>>>(o, x, residual, weight, size);
-}
-
-// ====================================================================
-// 🚀 Softmax
-// ====================================================================
-__global__ void softmax_kernel(float* x, int size) {
-    __shared__ float s_max;
-    __shared__ float s_sum;
-    int tid = threadIdx.x;
-    if (tid == 0) {
-        float max_val = x[0];
-        for (int i = 1; i < size; i++) if (x[i] > max_val) max_val = x[i];
-        s_max = max_val;
-        s_sum = 0.0f;
-    }
-    __syncthreads();
-    if (tid < size) {
-        float val = expf(x[tid] - s_max);
-        x[tid] = val;
-        atomicAdd(&s_sum, val);
-    }
-    __syncthreads();
-    if (tid < size) x[tid] = x[tid] / s_sum;
-}
-
-void softmax_cuda(float* x, int size) {
-    softmax_kernel<<<1, size>>>(x, size);
 }
 
 // ====================================================================
@@ -233,7 +206,7 @@ void free_gpu_state(RunStateGPU* s_gpu) {
 }
 
 // ====================================================================
-// 🔧 Supplementary Kernels (Add, Silu, RoPE)
+// 🔧 Supplementary Kernels
 // ====================================================================
 __global__ void add_kernel(float* x, float* y, int size) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -250,7 +223,9 @@ __global__ void silu_mul_kernel(float* hb, float* hb2, int size) {
     }
 }
 
-// 🚀 Llama 3.2 专属分段 RoPE 频率计算器
+// ====================================================================
+// 🚀 Llama 3.2 RoPE
+// ====================================================================
 __device__ float get_llama3_scaled_freq(int head_dim_idx, int head_size) {
     float freq = 1.0f / powf(500000.0f, (head_dim_idx * 2) / (float)head_size);
     float wavelength = 2.0f * 3.141592653589793f / freq;
@@ -269,7 +244,6 @@ __device__ float get_llama3_scaled_freq(int head_dim_idx, int head_size) {
     return freq;
 }
 
-// 🚀 终极版 RoPE Kernel (兼容 HuggingFace 前后半区排布)
 __global__ void rope_kernel(float* q, float* k, int pos, int dim, int kv_dim, int head_size) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     
@@ -302,32 +276,92 @@ __global__ void rope_kernel(float* q, float* k, int pos, int dim, int kv_dim, in
     }
 }
 
-__global__ void attention_query_key_kernel(float* att, float* q, float* key_cache, int head_size, int kv_dim, int kv_mul, int seq_len, int loff, int pos) {
-    int h = blockIdx.x;
-    for (int t = threadIdx.x; t <= pos; t += blockDim.x) {
-        float* h_q = q + h * head_size;
-        float* h_k = key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
-        float score = 0.0f;
-        for (int i = 0; i < head_size; i++) score += h_q[i] * h_k[i];
-        att[h * seq_len + t] = score / sqrtf((float)head_size);
-    }
-}
+// ====================================================================
+// 🔥 Fused Attention Kernel (Flash Attention 风格)
+// 将 QK^T + Softmax + V*Att 三步融合为一个 Kernel
+// 原来: attention_query_key_kernel (1次) + cudaDeviceSynchronize
+//       + softmax_cuda (32次/层) + attention_value_kernel (1次)
+//     = 每层 34 次 kernel launch + 1 次同步
+// 现在: 每层只需 1 次 kernel launch，零同步
+// ====================================================================
+__global__ void fused_attention_kernel(
+    float* xb,            // 输出 [dim]
+    float* q,             // Query [dim]
+    float* key_cache,     // KV Cache
+    float* value_cache,   // KV Cache
+    int head_size, int kv_dim, int kv_mul, int seq_len, int loff, int pos
+) {
+    int h = blockIdx.x;   // 每个 block 处理一个 attention head
+    int tid = threadIdx.x;
+    int kv_head = h / kv_mul;
+    float* h_q = q + h * head_size;
 
-__global__ void attention_value_kernel(float* xb, float* att, float* value_cache, int head_size, int kv_dim, int kv_mul, int seq_len, int loff, int pos) {
-    int h = blockIdx.x; int i = threadIdx.x;
-    if (i < head_size) {
+    // 动态共享内存: 前 (pos+1) 个 float 存 attention scores
+    extern __shared__ float shared_att[];
+
+    // ==========================================
+    // Step 1: 计算 QK^T (scores 存入 shared memory，不写全局显存)
+    // ==========================================
+    for (int t = tid; t <= pos; t += blockDim.x) {
+        float* h_k = key_cache + loff + t * kv_dim + kv_head * head_size;
+        float score = 0.0f;
+        for (int i = 0; i < head_size; i++) {
+            score += h_q[i] * h_k[i];
+        }
+        shared_att[t] = score / sqrtf((float)head_size);
+    }
+    __syncthreads();
+
+    // ==========================================
+    // Step 2: Softmax (完全在 shared memory 内完成)
+    // ==========================================
+    // 2a. 并行求 max
+    __shared__ float s_max;
+    if (tid == 0) {
+        float max_val = shared_att[0];
+        for (int t = 1; t <= pos; t++) {
+            if (shared_att[t] > max_val) max_val = shared_att[t];
+        }
+        s_max = max_val;
+    }
+    __syncthreads();
+
+    // 2b. 并行 exp
+    for (int t = tid; t <= pos; t += blockDim.x) {
+        shared_att[t] = expf(shared_att[t] - s_max);
+    }
+    __syncthreads();
+
+    // 2c. 并行求 sum
+    __shared__ float s_sum;
+    if (tid == 0) {
+        float sum = 0.0f;
+        for (int t = 0; t <= pos; t++) sum += shared_att[t];
+        s_sum = sum;
+    }
+    __syncthreads();
+
+    // 2d. 归一化
+    for (int t = tid; t <= pos; t += blockDim.x) {
+        shared_att[t] /= s_sum;
+    }
+    __syncthreads();
+
+    // ==========================================
+    // Step 3: 加权求和 V (直接输出，无需中间 buffer)
+    // ==========================================
+    if (tid < head_size) {
         float val = 0.0f;
         for (int t = 0; t <= pos; t++) {
-            float* h_v = value_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
-            float a = att[h * seq_len + t];
-            val += a * h_v[i];
+            float* h_v = value_cache + loff + t * kv_dim + kv_head * head_size;
+            val += shared_att[t] * h_v[tid];
         }
-        xb[h * head_size + i] = val;
+        xb[h * head_size + tid] = val;
     }
 }
 
 // ====================================================================
-// 🚀 Forward Pass (INT8 + 融合算子)
+// 🚀 Forward Pass (INT8 + 融合算子 + Flash Attention)
 // ====================================================================
 float* forward_cuda(int token, int pos, Config* p, TransformerWeightsGPU* w, RunStateGPU* s) {
     int dim = p->dim; int hidden_dim = p->hidden_dim; int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
@@ -340,7 +374,6 @@ float* forward_cuda(int token, int pos, Config* p, TransformerWeightsGPU* w, Run
     cudaMemcpy(s->x, w->token_embedding_table + token * dim, dim * sizeof(float), cudaMemcpyDeviceToDevice);
 
     for (int l = 0; l < p->n_layers; l++) {
-        // Attention 前的 RMSNorm (第一层无法融合，因为前面没有 add)
         rmsnorm_cuda(s->xb, s->x, w->rms_att_weight + l * dim, dim);
         
         // Q K V MatMul (INT8)
@@ -354,14 +387,17 @@ float* forward_cuda(int token, int pos, Config* p, TransformerWeightsGPU* w, Run
         cudaMemcpy(s->key_cache + loff + pos * kv_dim, s->k, kv_dim * sizeof(float), cudaMemcpyDeviceToDevice);
         cudaMemcpy(s->value_cache + loff + pos * kv_dim, s->v, kv_dim * sizeof(float), cudaMemcpyDeviceToDevice);
 
-        attention_query_key_kernel<<<p->n_heads, 256>>>(s->att, s->q, s->key_cache, head_size, kv_dim, kv_mul, p->seq_len, loff, pos);
-        cudaDeviceSynchronize();
-        for (int h = 0; h < p->n_heads; h++) softmax_cuda(s->att + h * p->seq_len, pos + 1);
-        attention_value_kernel<<<p->n_heads, head_size>>>(s->xb, s->att, s->value_cache, head_size, kv_dim, kv_mul, p->seq_len, loff, pos);
+        // 🔥 Flash Attention: 1 次 launch 替代原来的 34 次 + 1 次 sync
+        // 共享内存大小 = (pos+1) * sizeof(float)，最大 1024*4 = 4KB
+        size_t smem_size = (pos + 1) * sizeof(float);
+        fused_attention_kernel<<<p->n_heads, 256, smem_size>>>(
+            s->xb, s->q, s->key_cache, s->value_cache,
+            head_size, kv_dim, kv_mul, p->seq_len, loff, pos
+        );
         
         matmul_int8(s->xb2, s->xb, w->wo_q + l * dim * dim, w->wo_s + l * (dim * dim / gs), dim, dim, gs);
 
-        // 🔥 融合点 1: Add + RMSNorm (原来是两个 kernel，现在合成一个)
+        // 🔥 融合 Add + RMSNorm
         fused_add_rmsnorm_cuda(s->xb, s->x, s->xb2, w->rms_ffn_weight + l * dim, dim);
 
         // FFN
@@ -371,13 +407,10 @@ float* forward_cuda(int token, int pos, Config* p, TransformerWeightsGPU* w, Run
         
         matmul_int8(s->xb, s->hb, w->w2_q + l * hidden_dim * dim, w->w2_s + l * (hidden_dim * dim / gs), hidden_dim, dim, gs);
 
-        // 残差连接 (下一轮循环开头的 rmsnorm 会读 s->x)
         add_kernel<<<blocks_dim, threads>>>(s->x, s->xb, dim);
     }
 
     rmsnorm_cuda(s->x, s->x, w->rms_final_weight, dim);
-    
-    // 分类头保留 FP32
     matmul(s->logits, s->x, w->wcls, dim, p->vocab_size);
 
     return s->logits;
