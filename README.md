@@ -51,7 +51,7 @@ Our hybrid-precision strategy (INT8 for hidden layers, FP32 for vocabulary embed
 
 ## System Architecture
 
-![System Architecture](Fig0_Architecture_v2.pdf)
+![System Architecture](Fig0_Architecture_v2.png)
 
 Three optimization points:
 - **Red** — Warp-level cooperative INT8 GEMV with on-the-fly dequantization
