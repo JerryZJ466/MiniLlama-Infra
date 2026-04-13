@@ -8,6 +8,20 @@ A from-scratch CUDA inference engine for **Llama-3.2-1B** on consumer GPUs, buil
 
 ---
 
+## Browse Code by Ablation Stage
+
+Each optimization stage is preserved as a git tag. Checkout any tag to see the exact kernel code for that stage:
+
+```bash
+git checkout v1-fp32-baseline   # Stage 1 — FP32 GEMV, 14.9 tok/s, 16.6% occupancy
+git checkout v2-int8-warp-opt   # Stage 3 — Warp-Opt INT8, 31 tok/s, 86.8% occupancy
+git checkout v3-full-optimized  # Stage 4+5 — Fused Add+RMSNorm + Fused Attention, 35.2 tok/s
+```
+
+> **Note:** Stage 2 (Naive INT8) does not have a separate tag — the naive kernel remains in `src/model_cuda_v2_shared.cu` alongside the optimized version as `matmul_int8_group_kernel_naive` for direct comparison.
+
+---
+
 ## Key Findings
 
 This project is not about chasing SOTA throughput. The goal is to precisely measure *why* each optimization works at the hardware level using NVIDIA Nsight Compute profiling.
