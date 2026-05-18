@@ -7,15 +7,20 @@
 #include <iostream>
 #include <vector>
 #include <string>
-#include <windows.h>
-#include <cuda_runtime.h>
-#include "../include/config.h"
-#include "../include/model.h"
-#include "../include/tokenizer.h"
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
 #include <iomanip>
+#include <cstring>
+#ifdef _WIN32
+  #include <windows.h>
+#else
+  #include <unistd.h>
+#endif
+#include <cuda_runtime.h>
+#include "../include/config.h"
+#include "../include/model.h"
+#include "../include/tokenizer.h"
 
 // ====================================================================
 // 🚀 核心 Benchmark 模块：严格拆分 Prefill 与 Decode
