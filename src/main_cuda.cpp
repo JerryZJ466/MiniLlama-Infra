@@ -1,3 +1,9 @@
+#ifndef _WIN32
+  #include <fcntl.h>
+  #include <sys/mman.h>
+  #include <sys/stat.h>
+#endif
+
 #include <iostream>
 #include <vector>
 #include <string>
@@ -244,19 +250,33 @@ void run_context_scaling_benchmark(Config* config, TransformerWeightsGPU* w_gpu,
 // ====================================================================
 // 🖥️ 主函数
 // ====================================================================
-int main() {
-    SetConsoleOutputCP(CP_UTF8);
-    std::cout << "Mini-Llama INT8 Group-wise CUDA Engine Starting..." << std::endl;
+int main(int argc, char* argv[]) {
+    const char* model_path = (argc > 1) ? argv[1] : "llama3_2_1B_q8_group.bin";
+    int seq_len_override = (argc > 2) ? atoi(argv[2]) : 1024;
 
-    // 1. 读取量化后的模型文件
-    HANDLE hFile = CreateFileA("llama3_2_1B_q8_group.bin", GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) { std::cout << "Error: Cannot find llama3_2_1B_q8_group.bin" << std::endl; return 1; }
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);
+    HANDLE hFile = CreateFileA(model_path, GENERIC_READ, FILE_SHARE_READ,
+                               NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        std::cout << "Error: Cannot open " << model_path << std::endl; return 1;
+    }
     HANDLE hMap = CreateFileMappingA(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
     float* data = (float*)MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
+    size_t file_size = GetFileSize(hFile, NULL);
+#else
+    int fd = open(model_path, O_RDONLY);
+    if (fd < 0) { printf("Error: Cannot open %s\n", model_path); return 1; }
+    struct stat st; fstat(fd, &st);
+    size_t file_size = st.st_size;
+    float* data = (float*)mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    if (data == MAP_FAILED) { printf("Error: mmap failed\n"); return 1; }
+    close(fd);
+#endif
 
     Config config;
     memcpy(&config, data, 28);
-    config.seq_len = 1024;
+    config.seq_len = seq_len_override;
     config.group_size = 64;
 
     std::cout << "Model Loaded | Parameters: 1B (INT8 Group-64) | Dim: " << config.dim << std::endl;
@@ -333,9 +353,13 @@ int main() {
     free_gpu_weights(&w_gpu);
     free_gpu_state(&s_gpu);
     delete[] cpu_logits;
+#ifdef _WIN32
     UnmapViewOfFile(data);
     CloseHandle(hMap);
     CloseHandle(hFile);
+#else
+    munmap(data, file_size);
+#endif
     
     return 0;
 }
