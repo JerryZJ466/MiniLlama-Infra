@@ -27,58 +27,36 @@ void matmul(float* xout, float* x, float* w, int n, int d) {
 // ... 之前的 matmul_kernel 保持不动 ...
 
 // ====================================================================
-// 👑 论文核心亮点：Warp-Level 并行与合并访存 (Coalesced Memory Access)
+// Stage 2: Naive INT8 GEMV — one thread per output row (reconstructed)
+// Each thread independently dequantizes and accumulates its entire row.
+// Adjacent threads in a warp access different rows (stride = n bytes),
+// causing fully uncoalesced L2 access — root cause of the L2 hit rate
+// collapse documented in Table II of the paper.
 // ====================================================================
-
-// CUDA 官方推荐的 Warp 内规约原语
-__device__ inline float warpReduceSum(float val) {
-    for (int offset = 16; offset > 0; offset /= 2)
-        val += __shfl_down_sync(0xffffffff, val, offset);
-    return val;
-}
-
-__global__ void matmul_int8_group_kernel_v2(float* xout, float* x, int8_t* w_q, float* w_s, int n, int d, int group_size) {
-    // 💡 架构突变：现在是 32 个线程 (1个 Warp) 负责计算输出的一行
-    int warp_id = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
-    int lane_id = threadIdx.x % 32; // 0 到 31
-    int row = warp_id;              // 当前 Warp 负责的行号
-
-    if (row < d) {
+__global__ void matmul_int8_naive_kernel(float* xout, float* x, int8_t* w_q, float* w_s, int n, int d, int group_size) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;  // one thread owns one output row
+    if (i < d) {
         float val = 0.0f;
         int groups_per_row = n / group_size;
-
-        // 遍历该行的所有组
         for (int g = 0; g < groups_per_row; g++) {
-            // 组共享的 Scale，Warp 里的 32 个线程读的都是同一个地址，触发广播机制 (极速)
-            float scale = w_s[row * groups_per_row + g];
-            int start_idx = row * n + g * group_size;
-
-            // 🚀 Warp 内的 32 个线程协同读取这一组的 64 个元素
-            // 线程 0 读 0,32; 线程 1 读 1,33... 绝对完美的连续内存访问！
-            for (int j = lane_id; j < group_size; j += 32) {
-                int col = g * group_size + j;
-                float weight_fp32 = (float)w_q[start_idx + j] * scale;
-                val += weight_fp32 * x[col];
+            float scale = w_s[i * groups_per_row + g];
+            int start_idx = i * n + g * group_size;
+            // All 32 threads in the warp access row i, i+1, ..., i+31 simultaneously.
+            // These rows are n=2048 bytes apart, forcing 32 separate cache-line fetches
+            // with <1% utilization each — this is the uncoalesced access pattern.
+            for (int j = 0; j < group_size; j++) {
+                val += (float)w_q[start_idx + j] * scale * x[g * group_size + j];
             }
         }
-
-        // 🚀 使用硬件原语，将 Warp 内 32 个线程的 val 闪电般加总
-        val = warpReduceSum(val);
-
-        // 由 Warp 的第 0 号线程代表大家，把最终结果写入显存
-        if (lane_id == 0) {
-            xout[row] = val;
-        }
+        xout[i] = val;
     }
 }
 
 void matmul_int8(float* xout, float* x, int8_t* w_q, float* w_s, int n, int d, int group_size) {
     int threadsPerBlock = 256;
-    // 既然 32 个线程算 1 行，那么 1 个 Block (256线程) 就能算 8 行
-    int rowsPerBlock = threadsPerBlock / 32; 
-    int blocksPerGrid = (d + rowsPerBlock - 1) / rowsPerBlock;
-    
-    matmul_int8_group_kernel_v2<<<blocksPerGrid, threadsPerBlock>>>(xout, x, w_q, w_s, n, d, group_size);
+    // Same grid config as FP32 baseline: 8 blocks for d=2048, occupancy ~16.6%
+    int blocksPerGrid = (d + threadsPerBlock - 1) / threadsPerBlock;
+    matmul_int8_naive_kernel<<<blocksPerGrid, threadsPerBlock>>>(xout, x, w_q, w_s, n, d, group_size);
 }
 // ====================================================================
 // 🚀 CUDA Kernel: RMSNorm & Softmax
