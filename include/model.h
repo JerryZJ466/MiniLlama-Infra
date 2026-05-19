@@ -49,6 +49,9 @@ struct TransformerWeightsGPU {
 struct RunStateGPU {
     float *x, *xb, *xb2, *hb, *hb2, *q, *k, *v, *att, *logits;
     float *key_cache, *value_cache;
+    // Stage 6: dp4a W8A8 buffers (size = max(dim, hidden_dim))
+    int8_t *act_q;
+    float  *act_s;
 };
 
 // ==========================================
@@ -56,10 +59,13 @@ struct RunStateGPU {
 // ==========================================
 void rmsnorm_cuda(float* o, float* x, float* weight, int size);
 void matmul(float* xout, float* x, float* w, int n, int d);
-void matmul_int8(float* xout, float* x, int8_t* w_q, float* w_s, int n, int d, int group_size); // 👈 新增声明
+void matmul_int8(float* xout, float* x, int8_t* w_q, float* w_s, int n, int d, int group_size);
+void matmul_dp4a(float* xout, const int8_t* x_q, const float* x_s, const int8_t* w_q, const float* w_s, int n, int d, int group_size);
+void quantize_activation(int8_t* xq, float* xs, const float* x, int n);
 void softmax_cuda(float* x, int size);
 
 float* forward_cuda(int token, int pos, Config* p, TransformerWeightsGPU* w, RunStateGPU* s);
+float* forward_cuda_dp4a(int token, int pos, Config* p, TransformerWeightsGPU* w, RunStateGPU* s);
 int argmax(float* logits, int size);
 
 void alloc_gpu_weights(TransformerWeightsGPU* w_gpu, TransformerWeights* w_cpu, Config* p);

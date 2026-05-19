@@ -129,6 +129,73 @@ void run_benchmark(Config* config, TransformerWeightsGPU* w_gpu, RunStateGPU* s_
 }
 
 // ====================================================================
+// 🚀 Stage 6: dp4a W8A8 Benchmark
+// ====================================================================
+void run_benchmark_dp4a(Config* config, TransformerWeightsGPU* w_gpu, RunStateGPU* s_gpu,
+                        const std::vector<std::string>& vocab, float* cpu_logits) {
+    std::cout << "\n==================================================" << std::endl;
+    std::cout << "🚀 Stage 6: dp4a W8A8 Benchmark" << std::endl;
+    std::cout << "==================================================\n" << std::endl;
+
+    std::vector<std::string> prompts = {
+        "Explain the theory of relativity in simple terms.",
+        "Write a C++ program to reverse a linked list.",
+        "Translate the following sentence to French: 'The weather is nice today.'",
+        "Summarize the main differences between CPU and GPU architectures."
+    };
+
+    std::vector<std::string> vocab_vec = vocab;
+    int target_gen_len = 128;
+    size_t logits_bytes = config->vocab_size * sizeof(float);
+
+    for (int pi = 0; pi < (int)prompts.size(); pi++) {
+        std::vector<int> prompt_tokens = encode_prompt(prompts[pi], vocab_vec);
+        int prompt_len = prompt_tokens.size();
+
+        // Warm-up
+        int pos = 0;
+        for (int i = 0; i < prompt_len; i++) {
+            forward_cuda_dp4a(prompt_tokens[i], pos, config, w_gpu, s_gpu);
+            pos++;
+        }
+
+        auto t_prefill_start = std::chrono::high_resolution_clock::now();
+        for (int i = 0; i < prompt_len; i++) {
+            forward_cuda_dp4a(prompt_tokens[i], i, config, w_gpu, s_gpu);
+        }
+        cudaDeviceSynchronize();
+        auto t_first_token = std::chrono::high_resolution_clock::now();
+
+        int next_token = 0;
+        cudaMemcpy(cpu_logits, s_gpu->logits, logits_bytes, cudaMemcpyDeviceToHost);
+        next_token = argmax(cpu_logits, config->vocab_size);
+
+        auto t_decode_start = std::chrono::high_resolution_clock::now();
+        for (int gen = 0; gen < target_gen_len - 1; gen++) {
+            float* d_logits = forward_cuda_dp4a(next_token, prompt_len + gen, config, w_gpu, s_gpu);
+            cudaMemcpy(cpu_logits, d_logits, logits_bytes, cudaMemcpyDeviceToHost);
+            next_token = argmax(cpu_logits, config->vocab_size);
+        }
+        cudaDeviceSynchronize();
+        auto t_end = std::chrono::high_resolution_clock::now();
+
+        double ttft_ms = std::chrono::duration<double, std::milli>(t_first_token - t_prefill_start).count();
+        double decode_s = std::chrono::duration<double>(t_end - t_decode_start).count();
+        double throughput = (target_gen_len - 1) / decode_s;
+        double tpot_ms = decode_s * 1000.0 / (target_gen_len - 1);
+
+        std::cout << "[" << pi+1 << "/4] Prompt: " << prompts[pi].substr(0, 50) << std::endl;
+        std::cout << "  -> [Metrics] Context: " << prompt_len << " | Generated: " << target_gen_len << " tokens" << std::endl;
+        std::cout << "  -> TTFT (Prefill):   " << std::fixed << std::setprecision(2) << ttft_ms << " ms" << std::endl;
+        std::cout << "  -> TPOT (Decode):    " << tpot_ms << " ms/tok" << std::endl;
+        std::cout << "  -> Throughput:       " << throughput << " tok/s" << std::endl;
+    }
+    std::cout << "\n==================================================" << std::endl;
+    std::cout << "Stage 6 dp4a Benchmark Complete." << std::endl;
+    std::cout << "==================================================" << std::endl;
+}
+
+// ====================================================================
 // 📊 Context Length Scaling Benchmark
 // 测试不同 context 长度下的 TTFT 和 Decode 吞吐量
 // ====================================================================
@@ -353,6 +420,9 @@ int main(int argc, char* argv[]) {
 
     // 5. 运行 Context Length Scaling Benchmark
     run_context_scaling_benchmark(&config, &w_gpu, &s_gpu, cpu_logits);
+
+    // 6. Stage 6: dp4a W8A8 Benchmark
+    run_benchmark_dp4a(&config, &w_gpu, &s_gpu, vocab, cpu_logits);
     
     // 6. 释放资源
     free_gpu_weights(&w_gpu);

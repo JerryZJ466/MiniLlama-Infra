@@ -195,6 +195,9 @@ void alloc_gpu_state(RunStateGPU* s_gpu, Config* p) {
     cudaMalloc((void**)&s_gpu->logits, p->vocab_size * sizeof(float));
     cudaMalloc((void**)&s_gpu->key_cache, p->n_layers * p->seq_len * kv_dim * sizeof(float));
     cudaMalloc((void**)&s_gpu->value_cache, p->n_layers * p->seq_len * kv_dim * sizeof(float));
+    int act_buf_size = (hidden_dim > dim) ? hidden_dim : dim;
+    cudaMalloc((void**)&s_gpu->act_q, act_buf_size * sizeof(int8_t));
+    cudaMalloc((void**)&s_gpu->act_s, sizeof(float));
 }
 
 void free_gpu_state(RunStateGPU* s_gpu) {
@@ -203,6 +206,7 @@ void free_gpu_state(RunStateGPU* s_gpu) {
     cudaFree(s_gpu->q); cudaFree(s_gpu->k); cudaFree(s_gpu->v);
     cudaFree(s_gpu->att); cudaFree(s_gpu->logits);
     cudaFree(s_gpu->key_cache); cudaFree(s_gpu->value_cache);
+    cudaFree(s_gpu->act_q); cudaFree(s_gpu->act_s);
 }
 
 // ====================================================================
@@ -413,6 +417,151 @@ float* forward_cuda(int token, int pos, Config* p, TransformerWeightsGPU* w, Run
     rmsnorm_cuda(s->x, s->x, w->rms_final_weight, dim);
     matmul(s->logits, s->x, w->wcls, dim, p->vocab_size);
 
+    return s->logits;
+}
+
+// ====================================================================
+// 🚀 Stage 6: dp4a W8A8 Kernels
+// ====================================================================
+
+// Per-token dynamic INT8 quantization of activation vector.
+// Uses float-as-uint atomicMax trick (valid for non-negative floats).
+__global__ void quantize_activation_kernel(int8_t* xq, float* xs, const float* x, int n) {
+    __shared__ unsigned int s_max_bits;
+    if (threadIdx.x == 0) s_max_bits = 0;
+    __syncthreads();
+
+    float local_max = 0.0f;
+    for (int i = threadIdx.x; i < n; i += blockDim.x)
+        local_max = fmaxf(local_max, fabsf(x[i]));
+
+    for (int offset = 16; offset > 0; offset /= 2)
+        local_max = fmaxf(local_max, __shfl_down_sync(0xffffffff, local_max, offset));
+
+    if (threadIdx.x % 32 == 0)
+        atomicMax(&s_max_bits, __float_as_uint(local_max));
+    __syncthreads();
+
+    float scale = __uint_as_float(s_max_bits) / 127.0f;
+    if (scale < 1e-8f) scale = 1e-8f;
+    if (threadIdx.x == 0) *xs = scale;
+    __syncthreads();
+
+    float inv_scale = 1.0f / scale;
+    for (int i = threadIdx.x; i < n; i += blockDim.x) {
+        float v = x[i] * inv_scale;
+        xq[i] = (int8_t)max(-127, min(127, __float2int_rn(v)));
+    }
+}
+
+void quantize_activation(int8_t* xq, float* xs, const float* x, int n) {
+    int threads = (n < 1024) ? n : 1024;
+    quantize_activation_kernel<<<1, threads>>>(xq, xs, x, n);
+}
+
+// Warp-level dp4a W8A8 GEMV.
+// Each warp owns one output row; __dp4a accumulates 4 INT8 MACs per cycle.
+// group_size must be divisible by 4 (satisfied for group_size=64).
+__global__ void matmul_dp4a_kernel(float* xout,
+                                    const int8_t* __restrict__ x_q, const float* x_s,
+                                    const int8_t* __restrict__ w_q, const float* w_s,
+                                    int n, int d, int group_size) {
+    int warp_id = (blockIdx.x * blockDim.x + threadIdx.x) / 32;
+    int lane_id = threadIdx.x % 32;
+    int row = warp_id;
+    if (row >= d) return;
+
+    float x_scale = *x_s;
+    int groups_per_row = n / group_size;
+    float fp32_acc = 0.0f;
+
+    for (int g = 0; g < groups_per_row; g++) {
+        float w_scale = w_s[row * groups_per_row + g];
+        int w_base = row * n + g * group_size;
+        int x_base = g * group_size;
+
+        int32_t group_acc = 0;
+        // Each lane processes 4 elements at a time; stride = 32*4 = 128.
+        // For group_size=64: only lanes 0-15 execute the body (j < 64).
+        for (int j = lane_id * 4; j < group_size; j += 128) {
+            int w_pack = *reinterpret_cast<const int32_t*>(&w_q[w_base + j]);
+            int x_pack = *reinterpret_cast<const int32_t*>(&x_q[x_base + j]);
+            group_acc = __dp4a(w_pack, x_pack, group_acc);
+        }
+
+        // Warp-level INT32 reduce
+        for (int offset = 16; offset > 0; offset /= 2)
+            group_acc += __shfl_down_sync(0xffffffff, group_acc, offset);
+
+        if (lane_id == 0)
+            fp32_acc += (float)group_acc * w_scale * x_scale;
+    }
+
+    if (lane_id == 0) xout[row] = fp32_acc;
+}
+
+void matmul_dp4a(float* xout, const int8_t* x_q, const float* x_s,
+                 const int8_t* w_q, const float* w_s, int n, int d, int group_size) {
+    int threadsPerBlock = 256;
+    int rowsPerBlock = threadsPerBlock / 32;
+    int blocksPerGrid = (d + rowsPerBlock - 1) / rowsPerBlock;
+    matmul_dp4a_kernel<<<blocksPerGrid, threadsPerBlock>>>(xout, x_q, x_s, w_q, w_s, n, d, group_size);
+}
+
+// ====================================================================
+// 🚀 Stage 6 Forward Pass (dp4a W8A8)
+// ====================================================================
+float* forward_cuda_dp4a(int token, int pos, Config* p, TransformerWeightsGPU* w, RunStateGPU* s) {
+    int dim = p->dim; int hidden_dim = p->hidden_dim;
+    int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
+    int kv_mul = p->n_heads / p->n_kv_heads; int head_size = dim / p->n_heads;
+    int gs = p->group_size;
+    int threads = 256;
+    int blocks_dim = (dim + threads - 1) / threads;
+    int blocks_hidden = (hidden_dim + threads - 1) / threads;
+
+    cudaMemcpy(s->x, w->token_embedding_table + token * dim, dim * sizeof(float), cudaMemcpyDeviceToDevice);
+
+    for (int l = 0; l < p->n_layers; l++) {
+        rmsnorm_cuda(s->xb, s->x, w->rms_att_weight + l * dim, dim);
+
+        // Quantize xb → act_q/act_s, then dp4a for Q K V
+        quantize_activation(s->act_q, s->act_s, s->xb, dim);
+        matmul_dp4a(s->q,   s->act_q, s->act_s, w->wq_q + l*dim*dim,     w->wq_s + l*(dim*dim/gs),     dim, dim,    gs);
+        matmul_dp4a(s->k,   s->act_q, s->act_s, w->wk_q + l*dim*kv_dim,  w->wk_s + l*(dim*kv_dim/gs),  dim, kv_dim, gs);
+        matmul_dp4a(s->v,   s->act_q, s->act_s, w->wv_q + l*dim*kv_dim,  w->wv_s + l*(dim*kv_dim/gs),  dim, kv_dim, gs);
+
+        rope_kernel<<<blocks_dim, threads>>>(s->q, s->k, pos, dim, kv_dim, head_size);
+
+        int loff = l * p->seq_len * kv_dim;
+        cudaMemcpy(s->key_cache + loff + pos*kv_dim, s->k, kv_dim*sizeof(float), cudaMemcpyDeviceToDevice);
+        cudaMemcpy(s->value_cache + loff + pos*kv_dim, s->v, kv_dim*sizeof(float), cudaMemcpyDeviceToDevice);
+
+        size_t smem = (pos + 1) * sizeof(float);
+        fused_attention_kernel<<<p->n_heads, 256, smem>>>(s->xb, s->q, s->key_cache, s->value_cache,
+                                                           head_size, kv_dim, kv_mul, p->seq_len, loff, pos);
+
+        // Quantize attention output (xb) for output projection
+        quantize_activation(s->act_q, s->act_s, s->xb, dim);
+        matmul_dp4a(s->xb2, s->act_q, s->act_s, w->wo_q + l*dim*dim, w->wo_s + l*(dim*dim/gs), dim, dim, gs);
+
+        fused_add_rmsnorm_cuda(s->xb, s->x, s->xb2, w->rms_ffn_weight + l*dim, dim);
+
+        // Quantize for FFN gate/up projections
+        quantize_activation(s->act_q, s->act_s, s->xb, dim);
+        matmul_dp4a(s->hb,  s->act_q, s->act_s, w->w1_q + l*dim*hidden_dim, w->w1_s + l*(dim*hidden_dim/gs), dim, hidden_dim, gs);
+        matmul_dp4a(s->hb2, s->act_q, s->act_s, w->w3_q + l*dim*hidden_dim, w->w3_s + l*(dim*hidden_dim/gs), dim, hidden_dim, gs);
+        silu_mul_kernel<<<blocks_hidden, threads>>>(s->hb, s->hb2, hidden_dim);
+
+        // Quantize hb for FFN down projection
+        quantize_activation(s->act_q, s->act_s, s->hb, hidden_dim);
+        matmul_dp4a(s->xb, s->act_q, s->act_s, w->w2_q + l*hidden_dim*dim, w->w2_s + l*(hidden_dim*dim/gs), hidden_dim, dim, gs);
+
+        add_kernel<<<blocks_dim, threads>>>(s->x, s->xb, dim);
+    }
+
+    rmsnorm_cuda(s->x, s->x, w->rms_final_weight, dim);
+    matmul(s->logits, s->x, w->wcls, dim, p->vocab_size);
     return s->logits;
 }
 
