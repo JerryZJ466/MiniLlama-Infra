@@ -31,7 +31,7 @@ Shanghai, China \\
 \maketitle
 
 \begin{abstract}
-Deploying Large Language Models (LLMs) on consumer-grade edge GPUs is bottlenecked by limited VRAM capacity and memory bandwidth. Existing inference frameworks such as llama.cpp achieve high throughput through aggressive global quantization, but their monolithic designs obscure the micro-architectural sources of performance bottlenecks, making it difficult to attribute speedups to specific hardware-level mechanisms. In this paper, we present MiniLlama-Infra, a from-scratch LLM inference engine for the Llama-3.2-1B model, designed as a systematic ablation framework. We implement a hybrid-precision strategy that applies INT8 group-wise quantization to hidden layers while preserving FP32 precision for the vocabulary embedding, combined with a pre-allocated static VRAM pool. Using Nsight Compute profiling, we conduct a five-stage ablation study and report three key findings: (1) naive INT8 dequantization is \emph{counterproductive} on consumer GPUs---despite 4$\times$ smaller data, uncoalesced access patterns cause L2 cache hit rates to collapse to 2.63\%, yielding \emph{zero} net speedup over FP32; (2) warp-level cooperative memory access is the single most critical optimization, alone responsible for a 5.7$\times$ kernel speedup by restoring GPU occupancy from 16.6\% to 86.8\%; (3) once the memory access bottleneck is resolved, further operator fusion yields diminishing returns ($<$1\%), revealing that the system transitions to a compute-bound regime. Our engine achieves a WikiText-2 perplexity of 11.52 (vs.\ 11.50 FP16 baseline and 11.80 for llama.cpp Q8\_0) at 2054~MB peak VRAM, 13.6\% lower than PyTorch. We further validate findings (1) and (2) across three GPU architecture generations (Ada Lovelace, Ampere, Turing), confirming their architecture-independence. A context-length scaling analysis further quantifies the $O(N^2)$ sequential prefill bottleneck inherent in single-query GEMV architectures. The complete C++/CUDA source code and profiling data are publicly available at \url{https://github.com/JerryZJ466/MiniLlama-Infra}.
+Deploying Large Language Models (LLMs) on consumer-grade edge GPUs is bottlenecked by limited VRAM capacity and memory bandwidth. Existing inference frameworks such as llama.cpp achieve high throughput through aggressive global quantization, but their monolithic designs obscure the micro-architectural sources of performance bottlenecks, making it difficult to attribute speedups to specific hardware-level mechanisms. In this paper, we present MiniLlama-Infra, a from-scratch LLM inference engine for the Llama-3.2-1B model, designed as a systematic ablation framework. We implement a hybrid-precision strategy that applies INT8 group-wise quantization to hidden layers while preserving FP32 precision for the vocabulary embedding, combined with a pre-allocated static VRAM pool. Using Nsight Compute profiling, we conduct a six-stage ablation study and report five key findings: (1) naive INT8 dequantization is \emph{counterproductive} on consumer GPUs---despite 4$\times$ smaller data, uncoalesced access patterns cause L2 cache hit rates to collapse to 2.63\%, yielding \emph{zero} net speedup over FP32; (2) warp-level cooperative memory access is the single most critical optimization, alone responsible for a 5.7$\times$ kernel speedup by restoring GPU occupancy from 16.6\% to 86.8\%; (3) once the memory access bottleneck is resolved, further operator fusion yields diminishing returns ($<$1\%); (4) full W8A8 quantization via \texttt{\_\_dp4a} delivers an additional 25\% throughput gain with only 1.2\% perplexity degradation, shifting the kernel from memory-bandwidth-bound to compute-bound (IPC: 1.43$\to$2.08); (5) these optimizations generalize to 3B models, achieving a 4.34$\times$ cumulative speedup on RTX~3090. The complete pipeline achieves 44.0~tok/s at 2054~MB peak VRAM (2.95$\times$ over FP32 baseline) with a WikiText-2 perplexity degradation of only 1.2\% versus FP16, and delivers 31\% better energy efficiency (0.584 vs.\ 0.446~tok/J) at identical GPU power draw. We further validate our findings across three GPU architecture generations (Ada Lovelace, Ampere, Turing). The complete C++/CUDA source code and profiling data are publicly available at \url{https://github.com/JerryZJ466/MiniLlama-Infra}.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -55,6 +55,8 @@ Through this ablation, we arrive at several findings that challenge common assum
     \item \textbf{Warp-Level Cooperation as the Critical Enabler:} We show that warp-level cooperative dequantization with \texttt{\_\_shfl\_down\_sync} is the single most impactful optimization, alone responsible for a 5.7$\times$ kernel-level speedup and 2.1$\times$ end-to-end improvement. This demonstrates that \emph{memory coalescing, not data reduction, is the primary lever for edge GPU inference optimization}.
     \item \textbf{Diminishing Returns of Fusion:} Once the memory access bottleneck is resolved, operator fusion (Add+RMSNorm) yields $<$1\% improvement, revealing a \emph{phase transition from memory-bound to compute-bound} that limits the effectiveness of further fusion-based optimizations.
     \item \textbf{Hybrid Precision Advantage:} Our strategy of preserving FP32 vocabulary embeddings achieves 0.28 PPL lower perplexity than llama.cpp's global Q8\_0 (11.52 vs.\ 11.80), quantifying the accuracy cost of aggressive embedding quantization.
+    \item \textbf{dp4a W8A8 as a Compute-Regime Enabler:} Full W8A8 quantization via \texttt{\_\_dp4a} shifts the GEMV kernel from memory-bandwidth-bound to compute-bound (memory BW utilization: 31.5\%$\to$1.19\%; IPC: 1.43$\to$2.08), delivering a further 25\% throughput gain and 31\% energy efficiency improvement at identical GPU power.
+    \item \textbf{Cross-Scale Generalization:} Our optimizations generalize to the 3B model on RTX~3090, achieving a 4.34$\times$ cumulative speedup (FP32: 8.05~tok/s $\to$ dp4a W8A8: 35.07~tok/s), with the Stage~5$\to$6 gain (1.22$\times$) consistent with the 1B result (1.25$\times$).
 \end{itemize}
 
 %==========================================================
@@ -113,7 +115,7 @@ After all 16 layers, a final RMSNorm is applied, followed by an FP32 GEMV agains
 \section{Micro-Architecture Optimization and Ablation}
 %==========================================================
 
-We construct a five-stage ablation study, profiling each stage with NVIDIA Nsight Compute (full metric set, single-kernel capture) on an RTX~4060 Laptop GPU. All profiling targets the GEMV kernel for a single Transformer layer with $d=2048$. Table~\ref{tab:nsight} summarizes the key hardware metrics, and Fig.~\ref{fig:memory_wall} visualizes the end-to-end impact of each stage.
+We construct a six-stage ablation study, profiling each stage with NVIDIA Nsight Compute (full metric set, single-kernel capture) on an RTX~4060 Laptop GPU. All profiling targets the GEMV kernel for a single Transformer layer with $d=2048$. Table~\ref{tab:nsight} summarizes the key hardware metrics, and Fig.~\ref{fig:memory_wall} visualizes the end-to-end impact of each stage.
 
 \subsection{Stage 1: FP32 Baseline}
 The baseline FP32 GEMV kernel assigns one thread per output row, with a block size of 256 and grid size of 8 (total 2,048 threads for $d=2048$). Each thread independently computes one element of the output vector by iterating over the entire input dimension and accumulating the dot product.
@@ -187,7 +189,7 @@ Table~\ref{tab:ablation_summary} summarizes the end-to-end decoding throughput a
 
 \begin{table}[htbp]
 \centering
-\caption{End-to-End Ablation: Throughput, Quality, and Energy Efficiency (RTX~4060 Laptop)}
+\caption{End-to-End Ablation: Throughput, Quality, and Energy Efficiency (RTX~4060 Laptop). PPL evaluated on WikiText-2 with stride=2048 (FP16 ref.\ = 13.20); tok/J measured via \texttt{pynvml} at 50~ms intervals.}
 \label{tab:ablation_summary}
 \setlength{\tabcolsep}{2pt}
 \scriptsize
@@ -253,9 +255,9 @@ We select Llama-3.2-1B as the evaluation target for two reasons. First, it is re
 We compare three configurations: (1)~PyTorch (HuggingFace Transformers) with FP16 weights, (2)~llama.cpp with Q8\_0 global quantization, and (3)~MiniLlama-Infra with INT8 group-64 quantization and FP32 vocabulary. Decoding throughput is measured over 128 generated tokens with greedy sampling (temperature~0) and averaged across 4 prompts. Perplexity is evaluated on the WikiText-2 test set~\cite{merity2016wikitext} with a sliding window of 2048 tokens and stride 512.
 
 \subsection{End-to-End Performance}
-Table~\ref{tab:end_to_end} presents the end-to-end comparison. MiniLlama-Infra achieves 35.2~tok/s decoding throughput at 2054~MB peak VRAM. Compared to PyTorch, our engine delivers a 13.6\% VRAM reduction while maintaining comparable perplexity (11.52 vs.\ 11.50).
+Table~\ref{tab:end_to_end} presents the end-to-end comparison. MiniLlama-Infra Stage~6 achieves \textbf{44.0~tok/s} decoding throughput at 2054~MB peak VRAM---a 2.95$\times$ cumulative speedup over FP32 baseline. Compared to PyTorch, our engine delivers a 13.6\% VRAM reduction while maintaining perplexity within 1.2\% of FP16.
 
-The throughput gap relative to llama.cpp (144.9~tok/s) reflects the accumulated optimizations in that framework, including tiled GEMM for batched prefill, vectorized INT8 dot-product instructions (\texttt{dp4a}), fused multi-head attention kernels, and two years of community-driven optimization. Our single-developer, from-scratch engine does not incorporate these advanced techniques. However, our hybrid-precision approach achieves a measurably lower perplexity (11.52 vs.\ 11.80), demonstrating that the VRAM cost of preserving FP32 vocabulary precision is justified by the accuracy benefit.
+The throughput gap relative to llama.cpp (144.9~tok/s) reflects its tiled GEMM for batched prefill, extensive per-platform kernel tuning, and two years of community optimization. Our single-developer engine does not target maximum throughput but provides precise hardware-level attribution for each optimization. Notably, our hybrid-precision approach achieves measurably lower perplexity (11.52 vs.\ 11.80 for W8A32), demonstrating the value of preserving FP32 vocabulary precision.
 
 \begin{table}[htbp]
 \centering
@@ -270,14 +272,15 @@ The throughput gap relative to llama.cpp (144.9~tok/s) reflects the accumulated 
 PyTorch (HF) & FP16 & 2377 & 59.3 & 11.50 \\
 llama.cpp & Q8\_0 (Global) & 1252$^{\mathrm{a}}$ & 144.9 & 11.80 \\
 \midrule
-\textbf{Ours} & \textbf{INT8+FP32$^{\mathrm{b}}$} & \textbf{2054} & \textbf{35.2} & \textbf{11.52} \\
+\textbf{Ours (Stage~6)} & \textbf{W8A8+FP32$^{\mathrm{b}}$} & \textbf{2054} & \textbf{44.0} & \textbf{11.64$^{\mathrm{c}}$} \\
 \bottomrule
 \end{tabular}
 
 \vspace{3pt}
 \raggedright
 \scriptsize $^{\mathrm{a}}$ Model buffer only (reported by \texttt{load\_tensors}). Global Q8\_0 quantizes all layers including vocabulary. \\
-\scriptsize $^{\mathrm{b}}$ INT8 group-64 for hidden layers; FP32 for vocabulary embedding and classification head.
+\scriptsize $^{\mathrm{b}}$ W8A8 dp4a for linear layers; FP32 for vocabulary embedding and classification head. \\
+\scriptsize $^{\mathrm{c}}$ W8A8 adds $+$1.2\% PPL relative to FP16 baseline (11.50$\times$1.012$\approx$11.64).
 \end{table}
 
 \subsection{Accuracy Verification}
@@ -374,6 +377,37 @@ These results confirm that \emph{warp-level memory coalescing is the dominant op
 \end{tabular}
 \end{table}
 
+\subsection{Scalability Across Model Sizes}
+
+To validate that our optimizations generalize beyond the 1B parameter scale, we port the engine to Llama-3.2-3B ($d=3072$, 28 layers, 24 heads, 8 KV heads) and benchmark on an RTX~3090 (Ampere SM~8.6, 936~GB/s, 24~GB VRAM).
+
+\textbf{FP32 Baseline (Stage 1) on 3B.}
+The FP32 3B model requires 12~GB VRAM for weights alone, which physically exceeds the 8~GB capacity of target edge devices such as the RTX~4060, making deployment infeasible without quantization. On the RTX~3090 (which provides sufficient VRAM for measurement), Stage~1 achieves only \textbf{8.05~tok/s} (mean of four runs: 8.08, 8.08, 8.00, 8.04~tok/s; TPOT $\approx$124~ms/tok). This establishes that \emph{INT8 quantization is not merely an optimization for 3B models---it is a prerequisite for deployment on 8~GB edge hardware}.
+
+\textbf{Optimized Pipeline (Stages 5--6) on 3B.}
+Stage~5 achieves \textbf{28.71~tok/s} and Stage~6 dp4a W8A8 achieves \textbf{35.07~tok/s} (mean: 35.09, 35.06, 35.07, 35.06~tok/s).
+The cumulative speedup from FP32 baseline to dp4a is $35.07 / 8.05 = \mathbf{4.36}\times$, exceeding the 1B model's 2.95$\times$ because FP32 3B is especially penalized by the memory wall (12~GB weights vs.\ 4~GB for 1B).
+
+The Stage~5$\to$6 speedup ratio on 3B is 1.22$\times$, compared to 1.25$\times$ on 1B---a difference of only 2.4\%.
+This consistency confirms that \emph{our micro-architectural optimizations are model-size-agnostic}: the warp-level memory coalescing and \texttt{\_\_dp4a} SIMD benefits arise from GPU hardware characteristics rather than model-specific properties.
+
+\begin{table}[htbp]
+\centering
+\caption{3B Model Scalability Validation (RTX~3090, Ampere SM~8.6)}
+\label{tab:3b_validation}
+\setlength{\tabcolsep}{4pt}
+\scriptsize
+\begin{tabular}{lccc}
+\toprule
+\textbf{Stage} & \textbf{tok/s} & \textbf{vs.\ Stage 1} & \textbf{Notes} \\
+\midrule
+1. FP32 Baseline & 8.05 & 1.00$\times$ & 12~GB VRAM; OOM on RTX~4060 \\
+5. + Fused Attn  & 28.71 & 3.56$\times$ & W8A32 quantized \\
+6. + dp4a W8A8   & \textbf{35.07} & \textbf{4.36}$\times$ & Consistent with 1B gain \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 \subsection{Discussion on Fairness}
 The throughput gap between MiniLlama-Infra and llama.cpp stems from multiple factors beyond quantization strategy. llama.cpp employs batched GEMM for prefill, hardware-accelerated INT8 dot-product instructions, fused multi-head attention, and extensive per-platform kernel tuning. Our engine uses single-query GEMV for prefill, scalar INT8 dequantization, and a simplified attention fusion without tiling. These missing optimizations collectively account for the 4$\times$ throughput difference and represent concrete directions for future work. Our contribution lies not in absolute performance but in the transparency of our ablation: each optimization's impact is precisely quantified with hardware profiling data that is typically absent from production framework documentation.
 
@@ -381,7 +415,7 @@ The throughput gap between MiniLlama-Infra and llama.cpp stems from multiple fac
 
 Our study has several limitations. First, our engine implements single-query GEMV for both prefill and decode. Production frameworks use batched GEMM for prefill, converting the memory-bound GEMV into a compute-bound GEMM that enables tensor core utilization---a fundamental architectural advantage our current design cannot exploit. Implementing batched prefill is the most impactful improvement for closing the throughput gap.
 
-Third, our INT8 dequantization uses scalar multiply-accumulate operations. Modern NVIDIA GPUs provide \texttt{dp4a} instructions that perform four INT8 multiplications in a single cycle. Integrating \texttt{dp4a} into the warp-level kernel would further improve arithmetic throughput.
+Second, while Stage~6 implements \texttt{dp4a} W8A8 for linear layers, activation quantization currently uses per-token dynamic scaling. Static per-channel activation calibration (as in SmoothQuant) could further reduce quantization overhead and improve throughput.
 
 Finally, our context scaling analysis reveals severe prefill latency at longer sequences, motivating the adoption of FlashAttention-style tiled attention with online softmax for future versions of the engine.
 
@@ -389,7 +423,7 @@ Finally, our context scaling analysis reveals severe prefill latency at longer s
 \section{Conclusion}
 %==========================================================
 
-We presented MiniLlama-Infra, a from-scratch LLM inference engine designed as a micro-architecture ablation framework for edge GPU deployment. Through a five-stage optimization pipeline profiled with NVIDIA Nsight Compute, we demonstrated three key findings: (1)~naive INT8 quantization is counterproductive on consumer GPUs due to uncoalesced memory access, with throughput dropping from 58.1 to 19.2~GB/s---underscoring the primacy of access pattern optimization over data compression; (2)~warp-level cooperative dequantization is the single most critical optimization, alone restoring throughput to 85.6~GB/s and doubling end-to-end decoding speed; (3)~once the memory bottleneck is resolved, the system enters a compute-bound regime where further fusion yields diminishing returns. Our hybrid-precision approach achieves 35.2~tok/s at 2054~MB VRAM with a WikiText-2 perplexity of 11.52---0.28 PPL lower than llama.cpp's global Q8\_0---providing a reproducible reference for the hardware-level optimization landscape of edge LLM inference. Future work includes batched GEMM-based prefill and \texttt{dp4a} instructions to further close the throughput gap with production frameworks.The source code and profiling data will be made publicly available upon acceptance.
+We presented MiniLlama-Infra, a from-scratch LLM inference engine designed as a micro-architecture ablation framework for edge GPU deployment. Through a six-stage optimization pipeline profiled with NVIDIA Nsight Compute, we demonstrated five key findings: (1)~naive INT8 quantization is counterproductive on consumer GPUs due to uncoalesced memory access, with throughput dropping from 58.1 to 19.2~GB/s; (2)~warp-level cooperative dequantization is the single most critical optimization, alone restoring throughput to 85.6~GB/s and doubling decoding speed; (3)~once the memory bottleneck is resolved, operator fusion yields diminishing returns ($<$1\%); (4)~\texttt{\_\_dp4a} W8A8 quantization delivers a further 25\% throughput gain by shifting the kernel to a compute-bound regime (IPC: 1.43$\to$2.08, memory BW: 31.5\%$\to$1.19\%), with only 1.2\% perplexity degradation and 31\% better energy efficiency (0.584 vs.\ 0.446~tok/J); (5)~these gains generalize to 3B models, achieving 4.36$\times$ cumulative speedup over FP32 on RTX~3090, validated across Ada Lovelace, Ampere, and Turing architectures. The full pipeline achieves \textbf{44.0~tok/s} at 2054~MB peak VRAM---a 2.95$\times$ cumulative speedup---with a WikiText-2 perplexity of 11.52 for W8A32 (0.28 PPL lower than llama.cpp's global Q8\_0). Future work includes batched GEMM-based prefill to close the remaining throughput gap with production frameworks. The source code and profiling data are publicly available at \url{https://github.com/JerryZJ466/MiniLlama-Infra}.
 
 %==========================================================
 \begin{thebibliography}{00}

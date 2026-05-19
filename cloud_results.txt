@@ -79,7 +79,14 @@ TODO (remaining experiments)
       Finding: dp4a achieves 31% better energy efficiency at identical GPU power
 [ ] Stage 6 NCU profiling on 4060
 [ ] Per-layer breakdown
-[ ] Energy measurement (tok/J)
+[x] Energy measurement — Stage5 0.446 tok/J, Stage6 0.584 tok/J (+31%)
 [ ] Batching kernel benchmark
-[ ] Multi-model 3B validation
-[ ] Update paper Table I with Stage 6
+[x] Multi-model 3B validation (RTX 3090, Ampere SM 8.6, 2026-05-20):
+      Stage 1 FP32       :  8.05 tok/s avg (8.08, 8.08, 8.00, 8.04) | TPOT ~124 ms/tok
+      Stage 5 Flash Attn : 28.71 tok/s | TPOT 34.83 ms/tok
+      Stage 6 dp4a W8A8  : 35.07 tok/s (runs: 35.09, 35.06, 35.07, 35.06)
+      Cumulative Stage1->6: 35.07 / 8.05 = 4.36x
+      Stage 6/Stage 5 ratio: 1.22x (vs 1B: 1.25x) — consistent
+      Note: FP32 3B requires 12GB VRAM — exceeds 8GB edge GPU (RTX 4060) limit (OOM)
+      Fix applied: size_t cast for w1/w2/w3 cudaMalloc (int32 overflow bug for 3B)
+[x] Update paper Table I with Stage 6
