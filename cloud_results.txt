@@ -71,6 +71,12 @@ TODO (remaining experiments)
       Occupancy: 86.84% | IPC: 2.08 | Mem BW %: 1.19%
       vs Stage 3: Occupancy same, IPC +45% (1.43->2.08), Mem BW -96% (31.5->1.19%)
       Finding: dp4a shifts kernel from memory-bound to compute-bound
+[x] Energy measurement (RTX 4060, 2026-05-19, measure_energy.py):
+      GPU avg power: 76.7 W (min 72.6 / max 81.0 W, n=2610 samples @50ms)
+      Stage 5 Flash Attn : 34.18 tok/s | 0.446 tok/J
+      Stage 6 dp4a W8A8  : 44.80 tok/s | 0.584 tok/J
+      Energy gain: 1.31x tok/J (Stage 6 vs Stage 5), same power draw
+      Finding: dp4a achieves 31% better energy efficiency at identical GPU power
 [ ] Stage 6 NCU profiling on 4060
 [ ] Per-layer breakdown
 [ ] Energy measurement (tok/J)

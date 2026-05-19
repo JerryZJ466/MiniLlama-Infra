@@ -187,20 +187,20 @@ Table~\ref{tab:ablation_summary} summarizes the end-to-end decoding throughput a
 
 \begin{table}[htbp]
 \centering
-\caption{End-to-End Ablation: Decoding Throughput Across Five Stages}
+\caption{End-to-End Ablation: Throughput, Quality, and Energy Efficiency (RTX~4060 Laptop)}
 \label{tab:ablation_summary}
-\setlength{\tabcolsep}{2.5pt}
+\setlength{\tabcolsep}{2pt}
 \scriptsize
-\begin{tabular}{lccccc}
+\begin{tabular}{lcccccc}
 \toprule
-\textbf{Stage} & \textbf{tok/s} & \textbf{Incr.} & \textbf{Cumul.} & \textbf{WikiText-2 PPL} & \textbf{Key Mechanism} \\
+\textbf{Stage} & \textbf{tok/s} & \textbf{Incr.} & \textbf{Cumul.} & \textbf{PPL} & \textbf{tok/J} & \textbf{Key Mechanism} \\
 \midrule
-1. FP32 Baseline & 14.9 & --- & 1.00$\times$ & 13.20 (FP16 ref.) & --- \\
-2. Naive INT8 & 16.1 & 1.08$\times$ & 1.08$\times$ & 13.22 (+0.02) & Data reduction \\
-3. Warp-Opt INT8 & 31.8 & 1.98$\times$ & 2.13$\times$ & 13.22 (+0.02) & Coalesced access \\
-4. + Fused Ops & 30.0 & $<$1$\times$ & 2.01$\times$ & 13.22 (+0.02) & Kernel fusion \\
-5. + Fused Attn & 35.2 & 1.13$\times$ & 2.36$\times$ & 13.22 (+0.02) & Launch reduction \\
-6. + dp4a W8A8 & \textbf{44.0} & \textbf{1.25}$\times$ & \textbf{2.95}$\times$ & \textbf{13.36 (+0.16)} & INT8 SIMD \\
+1. FP32 Baseline  & 14.9 & ---          & 1.00$\times$ & 13.20        & ---   & --- \\
+2. Naive INT8     & 16.1 & 1.08$\times$ & 1.08$\times$ & 13.22        & ---   & Data reduction \\
+3. Warp-Opt INT8  & 31.8 & 1.98$\times$ & 2.13$\times$ & 13.22        & ---   & Coalesced access \\
+4. + Fused Ops    & 30.0 & $<$1$\times$ & 2.01$\times$ & 13.22        & ---   & Kernel fusion \\
+5. + Fused Attn   & 35.2 & 1.13$\times$ & 2.36$\times$ & 13.22        & 0.446 & Launch reduction \\
+6. + dp4a W8A8    & \textbf{44.0} & \textbf{1.25}$\times$ & \textbf{2.95}$\times$ & \textbf{13.36} & \textbf{0.584} & INT8 SIMD \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -334,6 +334,11 @@ Occupancy remains at 86.84\% (identical to Stage~3), confirming that the warp-le
 However, IPC rises from 1.43 to \textbf{2.08} ($+$45\%), a direct consequence of \texttt{\_\_dp4a} replacing four scalar multiplications with a single fused instruction.
 Most significantly, global memory bandwidth utilization drops from 31.5\% to \textbf{1.19\%} of peak---a 96\% reduction---indicating that the kernel has transitioned from a \emph{memory-bandwidth-bound} regime (Stage~3) to a \emph{compute-bound} regime (Stage~6).
 This phase transition is the hardware-level explanation for the throughput gain: once the memory wall is no longer the bottleneck, the additional arithmetic density of \texttt{\_\_dp4a} translates directly into higher throughput.
+
+We further measure energy efficiency using \texttt{pynvml} power sampling at 50~ms intervals during inference.
+The RTX~4060 Laptop draws a stable 76.7~W (min/max: 72.6/81.0~W) across both stages.
+Stage~5 achieves 0.446~tok/J, while Stage~6 achieves \textbf{0.584~tok/J}---a \textbf{31\% improvement in energy efficiency} at identical GPU power draw.
+This result demonstrates that \texttt{\_\_dp4a} delivers more useful work per joule, not merely faster execution at higher power, making it particularly attractive for battery-constrained or thermally-limited edge deployments.
 
 \subsection{Cross-Architecture Validation}
 
