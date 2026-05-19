@@ -1,0 +1,79 @@
+===================================================
+MiniLlama-Infra Experiment Results
+===================================================
+
+--- RTX 4060 Laptop (Ada Lovelace SM 8.9) --- [Local machine]
+Stage 1  FP32 Baseline : 14.9 tok/s | Mem BW 58.1 GB/s | Occupancy 16.6% | L2 hit 0.86%
+Stage 2  Naive INT8    : 16.1 tok/s | Mem BW 19.2 GB/s | Occupancy 16.6% | L2 hit 2.63%
+Stage 3  Warp-Opt INT8 : 31.8 tok/s | Mem BW 85.6 GB/s | Occupancy 86.8% | L2 hit 7.80%
+Stage 4  Fused Ops     : 30.0 tok/s
+Stage 5  Flash Attn    : 35.2 tok/s
+Stage 6  dp4a W8A8     : ~44 tok/s (avg: 45.56, 42.33, 42.22, 43.70)
+           vs Stage 5: +27% end-to-end gain
+           PPL verification (2026-05-19, stride=2048, WikiText-2):
+             FP16 Baseline : 13.1984
+             W8A32         : 13.2188  (+0.0204, +0.15%)
+             W8A8 Stage 6  : 13.3610  (+0.1626, +1.23% vs FP16)
+           Conclusion: W8A8 dp4a adds only 1.23% PPL degradation for +27% throughput
+
+===================================================
+CROSS-ARCHITECTURE NCU PROFILING
+===================================================
+
+Metric                  | RTX 4060 (Ada 8.9) | RTX 3090 (Ampere 8.6) | RTX 2080Ti (Turing 7.5)
+------------------------|--------------------|-----------------------|------------------------
+Stage 1 Occupancy (%)   | 16.6               | 16.6                  | 25.0
+Stage 1 IPC             | 0.11               | 0.11                  | 0.10
+Stage 2 Occupancy (%)   | 16.6               | 16.6                  | 25.0
+Stage 2 IPC             | 0.18               | 0.18                  | 0.18
+Stage 3 Occupancy (%)   | 86.8               | 49.4                  | 93.6
+Stage 3 IPC             | 1.43               | 0.95                  | 1.32
+Stage 3 Mem BW % peak   | 31.5               | 24.9                  | 33.4
+Stage 3 E2E (tok/s)     | 31.8               | 56.4                  | 27.0
+
+Key finding: Stage1->2 occupancy/IPC unchanged across all 3 architectures.
+             Stage3 shows dramatic improvement on all 3 — finding is architecture-independent.
+
+===================================================
+RTX 3080 Ti (Ampere SM 8.6) [Vast.ai 2026-05-18]
+===================================================
+Stage 5 end-to-end: 58.48 tok/s | TTFT 540.39ms | TPOT 17.10ms/tok
+Context Scaling (Stage 5):
+  Context 53  : 922.06ms  TTFT | 17.30ms/tok | 57.81 tok/s
+  Context 85  : 1455.39ms TTFT | 17.15ms/tok | 58.29 tok/s
+  Context 149 : 2526.58ms TTFT | 17.19ms/tok | 58.19 tok/s
+  Context 277 : 4667.16ms TTFT | 17.31ms/tok | 57.76 tok/s
+  Context 533 : 9015.43ms TTFT | 17.35ms/tok | 57.64 tok/s
+
+===================================================
+RTX 3090 (Ampere SM 8.6, CC 8.6) [Vast.ai 2026-05-19]
+===================================================
+Stage 2 end-to-end: ~16.3 tok/s (16.61, 16.17, 16.36, 16.38)
+Stage 3 end-to-end: ~56.4 tok/s (56.39, 56.27, 56.45, 56.58)
+Stage 1 NCU: Occupancy 16.64% | IPC 0.11 | Mem 1.17% peak | L1 hit 87.83%
+Stage 2 NCU: Occupancy 16.62% | IPC 0.18 | Mem 1.15% peak | L1 hit 96.77%
+Stage 3 NCU: Occupancy 49.36% | IPC 0.95 | Mem 24.86% peak | L1 hit 77.79%
+
+===================================================
+RTX 2080 Ti (Turing SM 7.5, CC 7.5) [Vast.ai 2026-05-19]
+===================================================
+Stage 2 end-to-end: ~7.7 tok/s
+Stage 3 end-to-end: ~27 tok/s (26.79~27.87)
+Stage 1 NCU: Occupancy 24.95% | IPC 0.10 | Mem 1.31% peak | L1 hit 87.83%
+Stage 2 NCU: Occupancy 24.98% | IPC 0.18 | Mem 1.30% peak | L1 hit 95.75%
+Stage 3 NCU: Occupancy 93.57% | IPC 1.32 | Mem 33.37% peak | L1 hit 78.30%
+
+===================================================
+TODO (remaining experiments)
+===================================================
+[x] Stage 6 dp4a PPL verification — W8A8: +1.23% PPL for +27% throughput
+[x] Stage 6 NCU profiling (RTX 4060, SM 8.9, 2026-05-19):
+      Occupancy: 86.84% | IPC: 2.08 | Mem BW %: 1.19%
+      vs Stage 3: Occupancy same, IPC +45% (1.43->2.08), Mem BW -96% (31.5->1.19%)
+      Finding: dp4a shifts kernel from memory-bound to compute-bound
+[ ] Stage 6 NCU profiling on 4060
+[ ] Per-layer breakdown
+[ ] Energy measurement (tok/J)
+[ ] Batching kernel benchmark
+[ ] Multi-model 3B validation
+[ ] Update paper Table I with Stage 6

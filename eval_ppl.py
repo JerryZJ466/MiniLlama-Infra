@@ -1,4 +1,6 @@
 import os
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import math
@@ -63,13 +65,15 @@ def apply_fake_quantization_w8a32(model, group_size=64):
 # ==========================================
 # 4. PPL 计算
 # ==========================================
-def evaluate_ppl(model, encodings, stride=512, max_length=2048):
+def evaluate_ppl(model, encodings, stride=2048, max_length=2048, max_tokens=None):
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"  [device: {device}]")
     model.to(device)
     model.eval()
     nlls = []
     prev_end_loc = 0
-    for begin_loc in tqdm(range(0, seq_len, stride), desc="Evaluating PPL"):
+    eval_len = min(seq_len, max_tokens) if max_tokens else seq_len
+    for begin_loc in tqdm(range(0, eval_len, stride), desc="Evaluating PPL"):
         end_loc = min(begin_loc + max_length, seq_len)
         trg_len = end_loc - prev_end_loc
         input_ids = encodings.input_ids[:, begin_loc:end_loc].to(device)
@@ -80,7 +84,7 @@ def evaluate_ppl(model, encodings, stride=512, max_length=2048):
             neg_log_likelihood = outputs.loss
         nlls.append(neg_log_likelihood)
         prev_end_loc = end_loc
-        if end_loc == seq_len:
+        if end_loc >= eval_len:
             break
     ppl = torch.exp(torch.stack(nlls).mean())
     return ppl.item()
@@ -88,6 +92,48 @@ def evaluate_ppl(model, encodings, stride=512, max_length=2048):
 # ==========================================
 # 5. 运行
 # ==========================================
+def apply_fake_quantization_w8a8(model, group_size=64):
+    """Stage 6: W8A8 — weight INT8 group-64 + activation per-token INT8 via forward hook."""
+    print(f"🔪 应用 W8A8 伪量化 (weight group-{group_size} + activation per-token)...")
+
+    # Weight quantization (same as W8A32)
+    with torch.no_grad():
+        for name, module in model.named_modules():
+            if isinstance(module, torch.nn.Linear) and "lm_head" not in name:
+                w = module.weight.data
+                out_f, in_f = w.shape
+                num_groups = in_f // group_size
+                w_g = w.view(out_f, num_groups, group_size)
+                w_max = w_g.abs().max(dim=-1, keepdim=True)[0]
+                scale = (w_max / 127.0).clamp(min=1e-7)
+                w_int8 = torch.round(w_g / scale).clamp(-128, 127)
+                module.weight.data = (w_int8 * scale).view(out_f, in_f)
+
+    # Activation quantization via hook: per-token dynamic INT8
+    handles = []
+    def make_hook(name):
+        def hook(module, inputs, output):
+            if "lm_head" in name:
+                return output
+            x = inputs[0]  # [batch, seq, hidden]
+            # Per-token scale: max(|x|) / 127
+            x_max = x.abs().amax(dim=-1, keepdim=True).clamp(min=1e-8)
+            scale = x_max / 127.0
+            x_q = torch.round(x / scale).clamp(-127, 127)
+            # Dequantize and rerun (simulate W8A8 round-trip)
+            x_dq = x_q * scale
+            # Recompute output with dequantized activation
+            return torch.nn.functional.linear(x_dq, module.weight, module.bias)
+        return hook
+
+    for name, module in model.named_modules():
+        if isinstance(module, torch.nn.Linear) and "lm_head" not in name:
+            handles.append(module.register_forward_hook(make_hook(name)))
+
+    print("✅ W8A8 伪量化完成")
+    return handles
+
+
 if __name__ == "__main__":
     print("\n" + "="*50)
     print("实验 A: FP16 Baseline")
@@ -98,12 +144,25 @@ if __name__ == "__main__":
     torch.cuda.empty_cache()
 
     print("\n" + "="*50)
-    print("实验 B: INT8 Group-64 (保留 lm_head FP16)")
-    model_quantized = AutoModelForCausalLM.from_pretrained(MODEL_PATH, torch_dtype=torch.float16)
-    apply_fake_quantization_w8a32(model_quantized, group_size=64)
-    ppl_quantized = evaluate_ppl(model_quantized, encodings)
-    print(f"📊 INT8 PPL: {ppl_quantized:.4f}")
+    print("实验 B: W8A32 INT8 Group-64 (Stage 3-5, 保留 lm_head FP16)")
+    model_w8a32 = AutoModelForCausalLM.from_pretrained(MODEL_PATH, torch_dtype=torch.float16)
+    apply_fake_quantization_w8a32(model_w8a32, group_size=64)
+    ppl_w8a32 = evaluate_ppl(model_w8a32, encodings)
+    print(f"📊 W8A32 PPL: {ppl_w8a32:.4f}")
+    del model_w8a32
+    torch.cuda.empty_cache()
 
     print("\n" + "="*50)
-    print(f"🏆 精度损失: {ppl_quantized - ppl_baseline:.4f} PPL points")
+    print("实验 C: W8A8 dp4a (Stage 6, weight+activation INT8)")
+    model_w8a8 = AutoModelForCausalLM.from_pretrained(MODEL_PATH, torch_dtype=torch.float16)
+    hooks = apply_fake_quantization_w8a8(model_w8a8, group_size=64)
+    ppl_w8a8 = evaluate_ppl(model_w8a8, encodings)
+    for h in hooks:
+        h.remove()
+    print(f"📊 W8A8 PPL: {ppl_w8a8:.4f}")
+
+    print("\n" + "="*50)
+    print(f"FP16 Baseline      : {ppl_baseline:.4f}")
+    print(f"W8A32 (Stage 3-5)  : {ppl_w8a32:.4f}  (+{ppl_w8a32 - ppl_baseline:.4f})")
+    print(f"W8A8  (Stage 6)    : {ppl_w8a8:.4f}  (+{ppl_w8a8 - ppl_baseline:.4f})")
     print("="*50)
