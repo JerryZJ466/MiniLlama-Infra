@@ -168,7 +168,7 @@ Algorithm~\ref{alg:warp_gemv} presents the pseudocode for the warp-level coopera
 \begin{figure}[htbp]
     \centering
     \includegraphics[width=\columnwidth]{Fig4_Memory_Access_Pattern.pdf}
-    \caption{Memory access patterns for Stage~2 (Naive INT8, left) vs.\ Stage~3 (Warp-Opt INT8, right). In Stage~2, each thread in a warp independently reads a different row of the weight matrix, issuing 32 scattered cache-line requests (stride = row size). In Stage~3, all 32 threads cooperatively process one row, reading 128 consecutive bytes in a single coalesced transaction. This restructuring is the sole cause of the 5.7$\times$ kernel speedup.}
+    \caption{Memory access patterns: Naive INT8 (Stage~2, left) issues 32 scattered cache-line requests per warp---only 1 useful byte per 128-byte line---while Warp-Opt INT8 (Stage~3, right) coalesces into a single 128-byte transaction. This single restructuring is the sole cause of the 5.7$\times$ kernel speedup---\emph{not} the 4$\times$ data compression.}
     \label{fig:memory_access}
 \end{figure}
 
@@ -275,7 +275,7 @@ Grid Size & 8 & 8 & \textbf{256} & 256 \\
 \begin{figure}[htbp]
     \centering
     \includegraphics[width=\columnwidth]{Fig2_Roofline_Model.pdf}
-    \caption{Extended roofline model on RTX~4060 Laptop. Stages~1--5 remain memory-bandwidth-bound; Stage~6 dp4a W8A8 crosses into the compute-bound region (IPC: 1.43$\to$2.08, memory BW utilization: 31.5\%$\to$1.19\%), confirming the micro-architectural regime shift.}
+    \caption{Extended roofline model on RTX~4060 Laptop. Stages~1--5 remain memory-bandwidth-bound (below the BW roof). Stage~6 dp4a W8A8 crosses into the compute-bound region, approaching the dp4a CUDA-core peak ($\approx$13~TOPS)---\emph{not} the INT8 tensor-core roof ($\approx$130~TOPS), which \texttt{\_\_dp4a} does not utilize. IPC rises from 1.43 to 2.08 and memory BW utilization drops from 31.5\% to 1.19\%.}
     \label{fig:roofline}
 \end{figure}
 
@@ -286,7 +286,7 @@ Grid Size & 8 & 8 & \textbf{256} & 256 \\
 \subsection{Experimental Setup}
 All experiments are conducted on a laptop equipped with an NVIDIA RTX~4060 Laptop GPU (8~GB GDDR6, 272~GB/s peak bandwidth, Ada Lovelace architecture, compute capability 8.9) and an Intel Core i9-13900HX CPU. The target model is Llama-3.2-1B~\cite{meta2024llama3} (16 layers, 2048 hidden dim, 32 attention heads, 8 KV heads, 128,256 vocabulary).
 
-We select Llama-3.2-1B as the evaluation target for two reasons. First, it is representative of the class of edge-deployable LLMs that fit within 8~GB VRAM at INT8 precision while retaining competitive language modeling quality. Second, our ablation methodology requires repeated Nsight Compute profiling with full metric collection (44 replay passes per kernel capture), which imposes substantial overhead. The 1B model provides a practical balance between model complexity and profiling feasibility; larger models (3B, 7B) would require multi-hour profiling sessions per ablation stage, limiting experimental iteration. We note that the micro-architectural findings (coalescing behavior, occupancy scaling, warp stall distributions) are architecture-dependent rather than model-size-dependent and are expected to generalize to larger models on the same GPU.
+We select Llama-3.2-1B as the evaluation target for two reasons. First, it is representative of the class of edge-deployable LLMs that fit within 8~GB VRAM at INT8 precision while retaining competitive language modeling quality. Second, our ablation methodology requires repeated Nsight Compute profiling with full metric collection (44 replay passes per kernel capture), which imposes substantial overhead. The 1B model provides a practical balance between model complexity and profiling feasibility; larger models (3B, 7B) would require multi-hour profiling sessions per ablation stage, limiting experimental iteration. We note that the micro-architectural findings (coalescing behavior, occupancy scaling, warp stall distributions) depend on GPU hardware characteristics rather than model-specific properties; our 3B experiments (Section~\ref{sec:3b}) confirm they generalize across model scales, and Section~\ref{sec:cross_arch} confirms they hold across three GPU architecture generations.
 
 We compare three configurations: (1)~PyTorch (HuggingFace Transformers) with FP16 weights, (2)~llama.cpp with Q8\_0 global quantization, and (3)~MiniLlama-Infra with INT8 group-64 quantization and FP32 vocabulary. Decoding throughput is measured over 128 generated tokens with greedy sampling (temperature~0) and averaged across 4 prompts. Perplexity is evaluated on the WikiText-2 test set~\cite{merity2016wikitext} with a sliding window of 2048 tokens and stride 512.
 
@@ -320,7 +320,7 @@ llama.cpp & Q8\_0 (Global) & 1252$^{\mathrm{a}}$ & 144.9 & 11.80 \\
 \end{table}
 
 \subsection{Accuracy Verification}
-We evaluate perplexity on the WikiText-2 test set using a sliding window approach. To isolate the effect of quantization from the inference engine implementation, we apply simulated INT8 group-64 quantization to the HuggingFace model weights (fake quantization: round-trip through INT8 and back to FP16, with \texttt{lm\_head} excluded). The FP16 baseline achieves a perplexity of 11.50, while the INT8 group-64 variant achieves 11.52---a degradation of only 0.02 PPL points. In contrast, llama.cpp's global Q8\_0 quantization achieves 11.80---a 0.30 PPL degradation from the FP16 baseline.
+We evaluate perplexity on the WikiText-2 test set~\cite{merity2016wikitext} using a sliding window with stride=512 and max\_length=2048. To isolate quantization effects, we apply fake quantization (INT8 round-trip with \texttt{lm\_head} excluded) to HuggingFace model weights. The FP16 baseline achieves 11.50~PPL; W8A32 achieves 11.52 ($+$0.02); W8A8 achieves 11.64 ($+$0.14, $+$1.2\% relative). In contrast, llama.cpp's global Q8\_0 achieves 11.80 ($+$0.30). Note: Table~\ref{tab:ablation_summary} reports PPL using stride=2048 for computational efficiency; the relative degradations (W8A32: $+$0.02, W8A8: $+$0.16) are consistent across both evaluation settings.
 
 This 0.28 PPL gap confirms the benefit of preserving FP32 precision for the vocabulary embedding. For applications where output quality is critical---such as medical or legal text generation---this precision advantage justifies the additional VRAM cost of our hybrid strategy.
 
@@ -353,17 +353,16 @@ This analysis provides concrete evidence that transitioning the prefill phase fr
 \begin{figure}[htbp]
     \centering
     \includegraphics[width=\columnwidth]{Fig3_Context_Scaling.pdf}
-    \caption{TTFT scaling with context length. The linear growth confirms the sequential forward pass bottleneck of single-query GEMV-based prefill, producing $O(N^2)$ total compute.}
+    \caption{TTFT scaling with context length (Stage~5 configuration; Stage~6 prefill behavior is identical as both use single-query GEMV). The linear growth confirms the $O(N^2)$ sequential prefill bottleneck.}
     \label{fig:context_scaling}
 \end{figure}
 
 \subsection{Cross-Architecture Validation}
+\label{sec:cross_arch}
 
 To assess whether our findings generalize beyond Ada Lovelace, we reproduced the kernel profiling on two additional GPU generations using Ubuntu VM instances with full hardware-counter access: RTX~3090 (Ampere, SM~8.6, 936~GB/s peak) and RTX~2080~Ti (Turing, SM~7.5, 616~GB/s peak). Table~\ref{tab:cross_arch} summarizes the results, including end-to-end throughput for Stages~2 and~3.
 
-The qualitative trend is fully consistent across all three architectures. Stages~1 and~2 exhibit nearly identical occupancy and IPC on every GPU (Stage~1 occupancy: 16.6\%\,/\,16.6\%\,/\,25.0\%; IPC: 0.11\,/\,0.11\,/\,0.10), confirming that the low-occupancy pathology of single-threaded GEMV is architecture-independent. Stage~3 dramatically improves both metrics on all three GPUs: occupancy jumps to 86.8\%\,/\,49.4\%\,/\,93.6\% and IPC rises to 1.43\,/\,0.95\,/\,1.32 for the 4060\,/\,3090\,/\,2080~Ti, respectively.
-
-The qualitative trend is fully consistent across all three architectures. Stages~1 and~2 exhibit nearly identical occupancy and IPC on every GPU, confirming that the low-occupancy pathology is architecture-independent. A counterintuitive observation: Stage~2 L1 hit rates exceed 95\% on all GPUs---\emph{higher} than Stage~1---yet throughput barely improves. This reveals that the bottleneck is L2-to-DRAM coalescing, not L1 capacity, motivating the warp-level access pattern fix in Stage~3.
+The qualitative trend is fully consistent across all three architectures. Stages~1 and~2 exhibit nearly identical occupancy and IPC on every GPU (Stage~1 occupancy: 16.6\%\,/\,16.6\%\,/\,25.0\%; IPC: 0.11\,/\,0.11\,/\,0.10), confirming that the low-occupancy pathology of single-threaded GEMV is architecture-independent. A counterintuitive observation: Stage~2 L1 hit rates exceed 95\% on all three GPUs---\emph{higher} than Stage~1---yet throughput barely improves. This reveals that the bottleneck is L2-to-DRAM coalescing, not L1 capacity: threads read different cache lines that happen to alias in L1, creating false locality while failing to coalesce at the memory controller.
 
 Stage~3 dramatically improves both occupancy and IPC across all GPUs. The lower absolute occupancy on RTX~3090 (49.4\% vs.\ 86.8\%) reflects its larger SM count (82 vs.\ 24). Notably, the Stage~2$\to$3 end-to-end speedup is \emph{larger} on 3090 and 2080~Ti (3.46$\times$/3.51$\times$) than on the 4060 (1.97$\times$), suggesting that higher-bandwidth GPUs benefit more from coalescing: the memory wall was the sole limiter, and removing it allows more of the raw bandwidth to be utilized.
 
@@ -373,12 +372,12 @@ These results confirm that \emph{warp-level memory coalescing is the dominant op
 \centering
 \caption{Cross-Architecture Profiling (1B model, $d=2048$). E2E throughput for Stage~2 and~3; NCU occupancy and IPC for all stages. L1 hit rates confirm Stage~2 bottleneck is L2/DRAM coalescing, not L1 capacity.}
 \label{tab:cross_arch}
-\setlength{\tabcolsep}{2.5pt}
+\setlength{\tabcolsep}{2pt}
 \scriptsize
 \begin{tabular}{llccc}
 \toprule
-\textbf{Stage} & \textbf{Metric} & \textbf{RTX 4060} & \textbf{RTX 3090} & \textbf{RTX 2080 Ti} \\
- & & \textit{Ada SM~8.9} & \textit{Ampere SM~8.6} & \textit{Turing SM~7.5} \\
+\textbf{Stage} & \textbf{Metric} & \textbf{RTX 4060} & \textbf{RTX 3090} & \textbf{RTX 2080~Ti} \\
+ & & \textit{Ada 8.9} & \textit{Ampere 8.6} & \textit{Turing 7.5} \\
 \midrule
 \multirow{3}{*}{Stage 1 (FP32)} & Occupancy (\%) & 16.6 & 16.6 & 25.0 \\
  & IPC & 0.11 & 0.11 & 0.10 \\
@@ -400,6 +399,7 @@ These results confirm that \emph{warp-level memory coalescing is the dominant op
 \end{table}
 
 \subsection{Scalability Across Model Sizes}
+\label{sec:3b}
 
 To validate that our optimizations generalize beyond the 1B parameter scale, we port the engine to Llama-3.2-3B ($d=3072$, 28 layers, 24 heads, 8 KV heads) and benchmark on an RTX~3090 (Ampere SM~8.6, 936~GB/s, 24~GB VRAM).
 
@@ -441,13 +441,17 @@ Our study has several limitations. First, our engine implements single-query GEM
 
 Second, while Stage~6 implements \texttt{dp4a} W8A8 for linear layers, activation quantization currently uses per-token dynamic scaling. Static per-channel activation calibration (as in SmoothQuant) could further reduce quantization overhead and improve throughput.
 
-Finally, our context scaling analysis reveals severe prefill latency at longer sequences, motivating the adoption of FlashAttention-style tiled attention with online softmax for future versions of the engine.
+Third, our context scaling analysis reveals severe prefill latency at longer sequences, motivating the adoption of FlashAttention-style tiled attention with online softmax for future versions.
+
+Fourth, all experiments use batch size~1. Production serving uses continuous batching to amortize GEMV latency over multiple concurrent requests; our analysis represents an upper bound on memory-bound single-stream behavior and does not characterize throughput at higher batch sizes where the bottleneck transitions to compute.
+
+Finally, our findings are validated on NVIDIA GPUs (Ada Lovelace, Ampere, Turing). Whether the same micro-architectural patterns hold on AMD ROCm, Apple Metal, or AI accelerators (e.g., Google TPU, AWS Trainium) remains an open question for future work.
 
 %==========================================================
 \section{Conclusion}
 %==========================================================
 
-We presented MiniLlama-Infra, a from-scratch LLM inference engine designed as a micro-architecture ablation framework for edge GPU deployment. Through a six-stage optimization pipeline profiled with NVIDIA Nsight Compute, we demonstrated five key findings: (1)~naive INT8 quantization is counterproductive on consumer GPUs due to uncoalesced memory access, with throughput dropping from 58.1 to 19.2~GB/s; (2)~warp-level cooperative dequantization is the single most critical optimization, alone restoring throughput to 85.6~GB/s and doubling decoding speed; (3)~once the memory bottleneck is resolved, operator fusion yields diminishing returns ($<$1\%); (4)~\texttt{\_\_dp4a} W8A8 quantization delivers a further 25\% throughput gain by shifting the kernel to a compute-bound regime (IPC: 1.43$\to$2.08, memory BW: 31.5\%$\to$1.19\%), with only 1.2\% perplexity degradation and 31\% better energy efficiency (0.584 vs.\ 0.446~tok/J); (5)~these gains generalize to 3B models, achieving 4.36$\times$ cumulative speedup over FP32 on RTX~3090, validated across Ada Lovelace, Ampere, and Turing architectures. The full pipeline achieves \textbf{44.0~tok/s} at 2054~MB peak VRAM---a 2.95$\times$ cumulative speedup---with a WikiText-2 perplexity of 11.52 for W8A32 (0.28 PPL lower than llama.cpp's global Q8\_0). Future work includes batched GEMM-based prefill to close the remaining throughput gap with production frameworks. The source code and profiling data are publicly available at \url{https://github.com/JerryZJ466/MiniLlama-Infra}.
+We presented MiniLlama-Infra, a from-scratch LLM inference engine designed as a micro-architecture ablation framework for edge GPU deployment. Through a six-stage optimization pipeline profiled with NVIDIA Nsight Compute, we demonstrated five key findings: (1)~naive INT8 quantization is counterproductive on consumer GPUs due to uncoalesced memory access, with throughput dropping from 58.1 to 19.2~GB/s; (2)~warp-level cooperative dequantization is the single most critical optimization, alone restoring throughput to 85.6~GB/s and doubling decoding speed; (3)~once the memory bottleneck is resolved, operator fusion yields diminishing returns ($<$1\%); (4)~\texttt{\_\_dp4a} W8A8 quantization delivers a further 25\% throughput gain by shifting the kernel to a compute-bound regime (IPC: 1.43$\to$2.08, memory BW: 31.5\%$\to$1.19\%), with only 1.2\% perplexity degradation and 31\% better energy efficiency (0.584 vs.\ 0.446~tok/J); (5)~these gains generalize to 3B models, achieving 4.36$\times$ cumulative speedup over FP32 on RTX~3090, validated across Ada Lovelace, Ampere, and Turing architectures. The full pipeline achieves \textbf{44.0~tok/s} at 2054~MB peak VRAM---a 2.95$\times$ cumulative speedup---with a WikiText-2 perplexity of 11.64 for W8A8 (11.52 for W8A32; 0.28 PPL lower than llama.cpp's global Q8\_0). Future work includes batched GEMM-based prefill to close the remaining throughput gap with production frameworks. The source code and profiling data are publicly available at \url{https://github.com/JerryZJ466/MiniLlama-Infra}.
 
 %==========================================================
 \begin{thebibliography}{00}

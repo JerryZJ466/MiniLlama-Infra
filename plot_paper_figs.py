@@ -38,20 +38,20 @@ def plot_memory_wall_ablation():
     ax2.tick_params(axis='y', labelcolor='#D0021B')
     ax2.set_ylim(0, 55)
 
-    # Annotations
-    ax2.annotate('Naive INT8\nslower than FP32!', xy=(1, 16.1), xytext=(1.55, 7),
+    # Annotations — carefully positioned to avoid overlap
+    ax2.annotate('Naive INT8\nslower than FP32!', xy=(1, 16.1), xytext=(0.1, 6),
                  arrowprops=dict(arrowstyle='->', color='red', lw=1.5),
-                 fontsize=8.5, color='red', fontstyle='italic')
-    ax2.annotate('+97%', xy=(2, 31.8), xytext=(2.25, 40),
+                 fontsize=8, color='red', fontstyle='italic')
+    ax2.annotate('+97%', xy=(2, 31.8), xytext=(2.6, 38),
                  arrowprops=dict(arrowstyle='->', color='#1a7a1a', lw=1.5),
                  fontsize=9.5, color='#1a7a1a', fontweight='bold')
-    ax2.annotate('+25%\n(compute-bound)', xy=(5, 44.0), xytext=(4.2, 50),
+    ax2.annotate('+25%', xy=(5, 44.0), xytext=(4.55, 51),
                  arrowprops=dict(arrowstyle='->', color='#900', lw=1.5),
-                 fontsize=8.5, color='#900', fontweight='bold')
-    # Stage 6 bar note
-    ax1.annotate('compute-\nbound', xy=(5, 3.2), xytext=(5, 25),
-                 arrowprops=dict(arrowstyle='->', color='gray', lw=1),
-                 fontsize=7.5, color='gray', ha='center')
+                 fontsize=9, color='#900', fontweight='bold')
+    # Stage 6: label the tiny bar explaining compute-bound
+    ax1.text(5, 6, 'compute-\nbound\n(<3 GB/s)', ha='center', va='bottom',
+             fontsize=7, color='gray',
+             bbox=dict(boxstyle='round,pad=0.2', facecolor='white', alpha=0.7, edgecolor='gray'))
 
     ax1.set_xticks(x)
     ax1.set_xticklabels(labels, fontsize=9)
@@ -81,10 +81,16 @@ def plot_roofline_model():
     x_line = np.logspace(-1, 2, 300)
     y_bw = mem_bw * x_line
 
+    dp4a_cuda_core_tops = 13.0  # dp4a via CUDA cores, not tensor cores
+
     ax.plot(x_line, y_bw, color='black', linestyle='--', linewidth=1.5,
             label=f'Mem BW roof ({mem_bw} GB/s)')
     ax.plot(x_line, [peak_int8_tops*1000]*len(x_line), color='navy',
-            linestyle=':', linewidth=1.2, label=f'Compute roof (~{peak_int8_tops} TOPS)')
+            linestyle=':', linewidth=1.0, alpha=0.5,
+            label=f'INT8 Tensor Core roof (~{peak_int8_tops} TOPS)')
+    ax.plot(x_line, [dp4a_cuda_core_tops*1000]*len(x_line), color='#D0021B',
+            linestyle='-.', linewidth=1.4,
+            label=f'dp4a CUDA Core roof (~{dp4a_cuda_core_tops} TOPS)')
 
     # Data points: (arithmetic_intensity, performance_GOPS, label, color, marker)
     points = [
@@ -304,21 +310,21 @@ def plot_energy_efficiency():
     ax2.set_ylim(0, 0.75)
 
     # Annotate improvement
-    ax2.annotate('+31% tok/J\n(same power)', xy=(5, 0.584), xytext=(3.8, 0.65),
+    ax2.annotate('+31%\ntok/J', xy=(5, 0.584), xytext=(3.5, 0.67),
                  arrowprops=dict(arrowstyle='->', color='#8B0000', lw=1.8),
                  fontsize=9, color='#8B0000', fontweight='bold')
-    ax2.plot([4, 4], [0.446, 0.446], 'o', color='#8B0000', markersize=10, zorder=6)
-    ax2.text(4.15, 0.43, '0.446', fontsize=8.5, color='#8B0000')
-    ax2.text(5.15, 0.57, '0.584', fontsize=8.5, color='#8B0000')
+    ax2.text(4.55, 0.41, '0.446', fontsize=8.5, color='#8B0000', ha='center')
+    ax2.text(5.45, 0.60, '0.584', fontsize=8.5, color='#8B0000', ha='center')
 
     h1, l1 = ax1.get_legend_handles_labels()
     h2, l2 = ax2.get_legend_handles_labels()
     ax1.legend(h1 + h2, l1 + l2, loc='upper left', framealpha=0.9, fontsize=8.5)
 
-    ax1.text(0.02, 0.97,
-             'GPU power stable at 76.7 W across all stages\n(min 72.6 W / max 81.0 W)',
-             transform=ax1.transAxes, fontsize=7.5, va='top',
-             bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
+    # Power note placed in bottom-right to avoid overlapping bars
+    ax1.text(0.98, 0.04,
+             'GPU power: 76.7 W ±4.2 W\n(stable across all stages)',
+             transform=ax1.transAxes, fontsize=7.5, va='bottom', ha='right',
+             bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.85, edgecolor='#bba'))
 
     plt.title('Throughput and Energy Efficiency Across Six Stages (RTX 4060 Laptop)',
               fontsize=10, pad=6)
