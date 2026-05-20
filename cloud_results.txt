@@ -1,42 +1,119 @@
 ===================================================
-MiniLlama-Infra Experiment Results
+MiniLlama-Infra — Complete Experiment Data
+Last updated: 2026-05-20
 ===================================================
 
---- RTX 4060 Laptop (Ada Lovelace SM 8.9) --- [Local machine]
-Stage 1  FP32 Baseline : 14.9 tok/s | Mem BW 58.1 GB/s | Occupancy 16.6% | L2 hit 0.86%
-Stage 2  Naive INT8    : 16.1 tok/s | Mem BW 19.2 GB/s | Occupancy 16.6% | L2 hit 2.63%
-Stage 3  Warp-Opt INT8 : 31.8 tok/s | Mem BW 85.6 GB/s | Occupancy 86.8% | L2 hit 7.80%
+===================================================
+SECTION 1: RTX 4060 LAPTOP — Main Ablation (1B model)
+Ada Lovelace SM 8.9 | 8GB GDDR6 | 272 GB/s peak BW
+===================================================
+
+--- End-to-End Decoding Throughput (tok/s) ---
+Stage 1  FP32 Baseline : 14.9 tok/s
+Stage 2  Naive INT8    : 16.1 tok/s
+Stage 3  Warp-Opt INT8 : 31.8 tok/s
 Stage 4  Fused Ops     : 30.0 tok/s
 Stage 5  Flash Attn    : 35.2 tok/s
-Stage 6  dp4a W8A8     : ~44 tok/s (avg: 45.56, 42.33, 42.22, 43.70)
-           vs Stage 5: +27% end-to-end gain
-           PPL verification (2026-05-19, stride=2048, WikiText-2):
-             FP16 Baseline : 13.1984
-             W8A32         : 13.2188  (+0.0204, +0.15%)
-             W8A8 Stage 6  : 13.3610  (+0.1626, +1.23% vs FP16)
-           Conclusion: W8A8 dp4a adds only 1.23% PPL degradation for +27% throughput
+Stage 6  dp4a W8A8     : 44.0 tok/s  (runs: 45.56, 42.33, 42.22, 43.70; σ=1.5)
+  Cumulative Stage1→6 : 2.95× (14.9 → 44.0)
+  Stage5→6 gain       : 1.25× (+25%)
+
+--- NCU Profiling — GEMV Kernel (RTX 4060, d=2048) ---
+Metric                  | Stage 1 FP32 | Stage 2 Naive | Stage 3 Warp-Opt | Stage 6 dp4a
+------------------------|--------------|---------------|------------------|-------------
+Kernel Duration (µs)    | 289.1        | 298.5         | 52.3             | N/A
+Achieved Occupancy (%)  | 16.6         | 16.6          | 86.8             | 86.84
+Mem Throughput (GB/s)   | 58.1         | 19.2          | 85.6             | <3.2
+Mem BW % peak           | ~21%         | ~7%           | 31.5             | 1.19
+Executed IPC            | 0.11         | 0.18          | 1.43             | 2.08
+L2 Hit Rate (%)         | 0.86         | 2.63          | 7.80             | N/A
+L1 Hit Rate (%)         | 87.8         | 96.8          | 77.8             | N/A
+No Eligible Warps (%)   | 97.3         | 95.5          | 63.8             | N/A
+Grid Size               | 8            | 8             | 256              | 256
+Total Threads           | 2048         | 2048          | 65536            | 65536
+
+Key findings:
+- Stage2 L1 hit 96.8% (higher than Stage1!) but throughput worse → L2/DRAM coalescing is bottleneck
+- Stage3→6: occupancy same (86.8%), IPC +45% (1.43→2.08), Mem BW -96% (31.5%→1.19%)
+- Stage6 is compute-bound, all other stages are memory-bound
+
+--- PPL Verification (WikiText-2, stride=512, standard eval) ---
+FP16 Baseline  : 11.50
+W8A32 (S3-S5)  : 11.52  (+0.02, +0.17%)
+W8A8  (S6)     : 11.64  (+0.14, +1.22%)
+llama.cpp Q8_0 : 11.80  (+0.30, +2.61%)
+Note: Hybrid precision (FP32 vocab) gives 0.28 PPL advantage over llama.cpp global Q8_0
+
+--- PPL Verification (WikiText-2, stride=2048, used in Table I) ---
+FP16 Baseline  : 13.1984
+W8A32 (S3-S5)  : 13.2188  (+0.0204, +0.15%)
+W8A8  (S6)     : 13.3610  (+0.1626, +1.23%)
+Note: stride=2048 gives higher absolute PPL but consistent relative degradation
+
+--- VRAM Usage ---
+Stage 5 (W8A32, static pool) : 2054 MB  (paper main result)
+PyTorch FP16 baseline        : 2377 MB  (+15.7% vs ours)
+llama.cpp Q8_0               : 1252 MB  (model buffer only; global quant)
+
+--- Baseline Comparisons (RTX 4060, Llama-3.2-1B) ---
+System          | Precision        | VRAM (MB) | tok/s  | PPL
+----------------|-----------------|-----------|--------|------
+PyTorch (HF)    | FP16            | 2377      | 59.3   | 11.50
+llama.cpp       | Q8_0 (global)   | 1252      | 144.9  | 11.80
+Ours Stage 5    | W8A32+FP32 emb  | 2054      | 35.2   | 11.52
+Ours Stage 6    | W8A8+FP32 emb   | 2054      | 44.0   | 11.64
+
+--- Context Scaling (RTX 4060, Stage 5, 1B model) ---
+Context Len | TTFT (ms) | TPOT (ms/tok) | Decode (tok/s)
+------------|-----------|---------------|---------------
+53          | 1604.5    | 28.42         | 35.18
+85          | 2521.9    | 29.33         | 34.10
+149         | 4427.5    | 29.10         | 34.36
+277         | 8188.4    | 29.63         | 33.75
+533         | 15792.7   | 29.37         | 34.04
+Note: TTFT scales linearly (O(N²) prefill), TPOT stable ~29 ms
+
+--- Energy Measurement (RTX 4060, 2026-05-19, pynvml @50ms) ---
+GPU avg power  : 76.7 W  (min 72.6 / max 81.0 W, n=2610 samples)
+Stage 5        : 34.18 tok/s  |  0.446 tok/J
+Stage 6 dp4a   : 44.80 tok/s  |  0.584 tok/J
+Energy gain    : 1.31× tok/J (Stage 6 vs Stage 5), identical power draw
+Finding        : dp4a is 31% more energy-efficient — more work/joule, not more watts
 
 ===================================================
-CROSS-ARCHITECTURE NCU PROFILING
+SECTION 2: CROSS-ARCHITECTURE PROFILING (1B model)
 ===================================================
 
-Metric                  | RTX 4060 (Ada 8.9) | RTX 3090 (Ampere 8.6) | RTX 2080Ti (Turing 7.5)
-------------------------|--------------------|-----------------------|------------------------
-Stage 1 Occupancy (%)   | 16.6               | 16.6                  | 25.0
-Stage 1 IPC             | 0.11               | 0.11                  | 0.10
-Stage 2 Occupancy (%)   | 16.6               | 16.6                  | 25.0
-Stage 2 IPC             | 0.18               | 0.18                  | 0.18
-Stage 3 Occupancy (%)   | 86.8               | 49.4                  | 93.6
-Stage 3 IPC             | 1.43               | 0.95                  | 1.32
-Stage 3 Mem BW % peak   | 31.5               | 24.9                  | 33.4
-Stage 3 E2E (tok/s)     | 31.8               | 56.4                  | 27.0
+--- NCU + E2E across 3 GPU generations ---
+Metric                    | RTX 4060       | RTX 3090       | RTX 2080 Ti
+                          | Ada SM 8.9     | Ampere SM 8.6  | Turing SM 7.5
+                          | 272 GB/s       | 936 GB/s       | 616 GB/s
+--------------------------|----------------|----------------|----------------
+Stage 1 Occupancy (%)     | 16.6           | 16.6 (16.64)   | 25.0 (24.95)
+Stage 1 IPC               | 0.11           | 0.11           | 0.10
+Stage 1 L1 Hit (%)        | 87.8           | 87.83          | 87.83
+Stage 1 Mem % peak        | ~21%           | 1.17           | 1.31
+Stage 2 Occupancy (%)     | 16.6           | 16.6 (16.62)   | 25.0 (24.98)
+Stage 2 IPC               | 0.18           | 0.18           | 0.18
+Stage 2 L1 Hit (%)        | 96.8           | 96.77          | 95.75
+Stage 2 E2E (tok/s)       | 16.1           | 16.3           | 7.7
+Stage 3 Occupancy (%)     | 86.8           | 49.4 (49.36)   | 93.6 (93.57)
+Stage 3 IPC               | 1.43           | 0.95           | 1.32
+Stage 3 L1 Hit (%)        | 77.8           | 77.79          | 78.30
+Stage 3 Mem BW % peak     | 31.5           | 24.86          | 33.37
+Stage 3 E2E (tok/s)       | 31.8           | 56.4           | 27.0
+Stage 2→3 speedup         | 1.97×          | 3.46×          | 3.51×
 
-Key finding: Stage1->2 occupancy/IPC unchanged across all 3 architectures.
-             Stage3 shows dramatic improvement on all 3 — finding is architecture-independent.
+Key findings:
+- Stage1/2 occupancy+IPC identical across all 3 architectures → finding is arch-independent
+- Stage2 L1 >95% on ALL GPUs but throughput worse → L2/DRAM coalescing confirmed as bottleneck
+- Stage2→3 speedup LARGER on higher-BW GPUs: 3090 (3.46×), 2080Ti (3.51×) vs 4060 (1.97×)
 
 ===================================================
-RTX 3080 Ti (Ampere SM 8.6) [Vast.ai 2026-05-18]
+SECTION 3: ADDITIONAL CLOUD EXPERIMENTS
 ===================================================
+
+--- RTX 3080 Ti (Ampere SM 8.6, 912 GB/s) [Vast.ai 2026-05-18] ---
 Stage 5 end-to-end: 58.48 tok/s | TTFT 540.39ms | TPOT 17.10ms/tok
 Context Scaling (Stage 5):
   Context 53  : 922.06ms  TTFT | 17.30ms/tok | 57.81 tok/s
@@ -44,49 +121,43 @@ Context Scaling (Stage 5):
   Context 149 : 2526.58ms TTFT | 17.19ms/tok | 58.19 tok/s
   Context 277 : 4667.16ms TTFT | 17.31ms/tok | 57.76 tok/s
   Context 533 : 9015.43ms TTFT | 17.35ms/tok | 57.64 tok/s
+Note: Used for cross-arch context scaling; TPOT stable ~17ms confirms memory-bound decode
 
 ===================================================
-RTX 3090 (Ampere SM 8.6, CC 8.6) [Vast.ai 2026-05-19]
+SECTION 4: 3B MODEL VALIDATION
+RTX 3090 (Ampere SM 8.6, 936 GB/s, 24GB VRAM) [Vast.ai 2026-05-20]
+Model: Llama-3.2-3B (d=3072, 28 layers, 24 heads, 8 KV heads)
 ===================================================
-Stage 2 end-to-end: ~16.3 tok/s (16.61, 16.17, 16.36, 16.38)
-Stage 3 end-to-end: ~56.4 tok/s (56.39, 56.27, 56.45, 56.58)
-Stage 1 NCU: Occupancy 16.64% | IPC 0.11 | Mem 1.17% peak | L1 hit 87.83%
-Stage 2 NCU: Occupancy 16.62% | IPC 0.18 | Mem 1.15% peak | L1 hit 96.77%
-Stage 3 NCU: Occupancy 49.36% | IPC 0.95 | Mem 24.86% peak | L1 hit 77.79%
+
+Stage 1 FP32       :  8.05 tok/s avg (runs: 8.08, 8.08, 8.00, 8.04) | TPOT ~124 ms/tok
+Stage 5 Flash Attn : 28.71 tok/s | TPOT 34.83 ms/tok
+Stage 6 dp4a W8A8  : 35.07 tok/s (runs: 35.09, 35.06, 35.07, 35.06) | TPOT ~28.5 ms/tok
+
+Cumulative Stage1→6 : 35.07 / 8.05 = 4.36×  (vs 1B: 2.95×)
+Stage 5→6 ratio     : 1.22×                  (vs 1B: 1.25×)  ← consistent
+
+Deployment implication:
+  3B FP32 weights = 12 GB → OOM on RTX 4060 (8 GB)
+  3B INT8 weights ≈ 3 GB  → fits comfortably on 8 GB edge GPU
+  → INT8 quantization is an ENABLER for 3B on edge, not just an optimization
+
+Engineering note:
+  int32 overflow bug fixed: w1/w2/w3 cudaMalloc needed size_t cast
+  28 × 3072 × 8192 × 4 = 2.82B bytes > INT_MAX (2.15B)
 
 ===================================================
-RTX 2080 Ti (Turing SM 7.5, CC 7.5) [Vast.ai 2026-05-19]
+SECTION 5: EXPERIMENT STATUS
 ===================================================
-Stage 2 end-to-end: ~7.7 tok/s
-Stage 3 end-to-end: ~27 tok/s (26.79~27.87)
-Stage 1 NCU: Occupancy 24.95% | IPC 0.10 | Mem 1.31% peak | L1 hit 87.83%
-Stage 2 NCU: Occupancy 24.98% | IPC 0.18 | Mem 1.30% peak | L1 hit 95.75%
-Stage 3 NCU: Occupancy 93.57% | IPC 1.32 | Mem 33.37% peak | L1 hit 78.30%
 
-===================================================
-TODO (remaining experiments)
-===================================================
-[x] Stage 6 dp4a PPL verification — W8A8: +1.23% PPL for +27% throughput
-[x] Stage 6 NCU profiling (RTX 4060, SM 8.9, 2026-05-19):
-      Occupancy: 86.84% | IPC: 2.08 | Mem BW %: 1.19%
-      vs Stage 3: Occupancy same, IPC +45% (1.43->2.08), Mem BW -96% (31.5->1.19%)
-      Finding: dp4a shifts kernel from memory-bound to compute-bound
-[x] Energy measurement (RTX 4060, 2026-05-19, measure_energy.py):
-      GPU avg power: 76.7 W (min 72.6 / max 81.0 W, n=2610 samples @50ms)
-      Stage 5 Flash Attn : 34.18 tok/s | 0.446 tok/J
-      Stage 6 dp4a W8A8  : 44.80 tok/s | 0.584 tok/J
-      Energy gain: 1.31x tok/J (Stage 6 vs Stage 5), same power draw
-      Finding: dp4a achieves 31% better energy efficiency at identical GPU power
-[ ] Stage 6 NCU profiling on 4060
+[x] Stage 1-5 ablation (RTX 4060)
+[x] Stage 6 dp4a implementation + benchmark
+[x] Stage 6 NCU profiling (RTX 4060)
+[x] PPL verification — W8A32 11.52, W8A8 11.64 (stride=512)
+[x] PPL Table I values — stride=2048 consistent relative degradation
+[x] Cross-architecture profiling — RTX 4060, 3090, 2080 Ti (3 GPUs)
+[x] Context scaling — RTX 4060 Stage 5 (used in paper Table IV)
+[x] Energy measurement — 0.446 tok/J (S5) vs 0.584 tok/J (S6), +31%
+[x] 3B model validation — RTX 3090, Stage 1/5/6, cumulative 4.36×
 [ ] Per-layer breakdown
-[x] Energy measurement — Stage5 0.446 tok/J, Stage6 0.584 tok/J (+31%)
 [ ] Batching kernel benchmark
-[x] Multi-model 3B validation (RTX 3090, Ampere SM 8.6, 2026-05-20):
-      Stage 1 FP32       :  8.05 tok/s avg (8.08, 8.08, 8.00, 8.04) | TPOT ~124 ms/tok
-      Stage 5 Flash Attn : 28.71 tok/s | TPOT 34.83 ms/tok
-      Stage 6 dp4a W8A8  : 35.07 tok/s (runs: 35.09, 35.06, 35.07, 35.06)
-      Cumulative Stage1->6: 35.07 / 8.05 = 4.36x
-      Stage 6/Stage 5 ratio: 1.22x (vs 1B: 1.25x) — consistent
-      Note: FP32 3B requires 12GB VRAM — exceeds 8GB edge GPU (RTX 4060) limit (OOM)
-      Fix applied: size_t cast for w1/w2/w3 cudaMalloc (int32 overflow bug for 3B)
-[x] Update paper Table I with Stage 6
+[ ] 3B cross-architecture (2080 Ti dp4a validation — optional)
