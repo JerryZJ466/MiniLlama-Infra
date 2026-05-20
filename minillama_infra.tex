@@ -165,6 +165,13 @@ Algorithm~\ref{alg:warp_gemv} presents the pseudocode for the warp-level coopera
 \end{algorithmic}
 \end{algorithm}
 
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\columnwidth]{Fig4_Memory_Access_Pattern.pdf}
+    \caption{Memory access patterns for Stage~2 (Naive INT8, left) vs.\ Stage~3 (Warp-Opt INT8, right). In Stage~2, each thread in a warp independently reads a different row of the weight matrix, issuing 32 scattered cache-line requests (stride = row size). In Stage~3, all 32 threads cooperatively process one row, reading 128 consecutive bytes in a single coalesced transaction. This restructuring is the sole cause of the 5.7$\times$ kernel speedup.}
+    \label{fig:memory_access}
+\end{figure}
+
 \subsection{Stage 4: Operator Fusion (Add + RMSNorm)}
 
 \textbf{Finding: The system has entered a compute-bound regime.} We fuse the residual addition and RMSNorm into a single kernel, eliminating one round of global memory read/write for the $d=2048$ activation vector (8~KB).
@@ -201,7 +208,14 @@ This phase transition is the hardware-level explanation for the throughput gain.
 
 We measure energy efficiency via \texttt{pynvml} at 50~ms intervals.
 The RTX~4060 Laptop draws a stable 76.7~W ($\pm$4.2~W) across both stages.
-Stage~5 achieves 0.446~tok/J; Stage~6 achieves \textbf{0.584~tok/J}---\textbf{31\% better energy efficiency at identical GPU power}---demonstrating that \texttt{\_\_dp4a} delivers more useful work per joule rather than consuming more power.
+Stage~5 achieves 0.446~tok/J; Stage~6 achieves \textbf{0.584~tok/J}---\textbf{31\% better energy efficiency at identical GPU power}---demonstrating that \texttt{\_\_dp4a} delivers more useful work per joule rather than consuming more power. Fig.~\ref{fig:energy} visualizes the throughput and energy efficiency across all six stages.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\columnwidth]{Fig5_Energy_Efficiency.pdf}
+    \caption{Throughput (bars) and energy efficiency (line, tok/J) across six stages on RTX~4060 Laptop. GPU power remains stable at 76.7~W ($\pm$4.2~W) throughout. Stage~6 dp4a W8A8 achieves both the highest throughput (44.0~tok/s) and the best energy efficiency (0.584~tok/J), a 31\% improvement over Stage~5 at identical power draw.}
+    \label{fig:energy}
+\end{figure}
 
 \subsection{Summary of Optimization Impact}
 
@@ -254,14 +268,14 @@ Grid Size & 8 & 8 & \textbf{256} & 256 \\
 \begin{figure}[htbp]
     \centering
     \includegraphics[width=\columnwidth]{Fig1_Memory_Wall_Ablation.pdf}
-    \caption{Six-stage ablation: MatMul memory throughput (bars) and end-to-end decoding speed (line). Naive INT8 achieves \emph{lower} throughput than FP32 due to uncoalesced access. Warp-level optimization restores bandwidth. dp4a W8A8 (Stage~6) delivers a further 25\% gain. (Figure shows Stages~1--5; Stage~6 bar added in revision.)}
+    \caption{Six-stage ablation on RTX~4060 Laptop. Bars show GEMV MatMul memory throughput; line shows end-to-end decoding speed. Naive INT8 (Stage~2) collapses bandwidth to 19.2~GB/s despite 4$\times$ smaller data. Warp-Opt (Stage~3) restores bandwidth to 85.6~GB/s. Stage~6 dp4a W8A8 becomes compute-bound (matmul BW $<$3~GB/s) yet achieves the highest throughput (44~tok/s).}
     \label{fig:memory_wall}
 \end{figure}
 
 \begin{figure}[htbp]
     \centering
     \includegraphics[width=\columnwidth]{Fig2_Roofline_Model.pdf}
-    \caption{Roofline model on RTX 4060. The Warp-Opt INT8 kernel approaches the memory bandwidth ceiling; the Naive INT8 kernel severely underutilizes available bandwidth despite smaller data.}
+    \caption{Extended roofline model on RTX~4060 Laptop. Stages~1--5 remain memory-bandwidth-bound; Stage~6 dp4a W8A8 crosses into the compute-bound region (IPC: 1.43$\to$2.08, memory BW utilization: 31.5\%$\to$1.19\%), confirming the micro-architectural regime shift.}
     \label{fig:roofline}
 \end{figure}
 
