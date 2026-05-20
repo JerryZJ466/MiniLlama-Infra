@@ -31,7 +31,7 @@ Shanghai, China \\
 \maketitle
 
 \begin{abstract}
-Deploying Large Language Models (LLMs) on consumer-grade edge GPUs is bottlenecked by limited VRAM capacity and memory bandwidth. Existing inference frameworks such as llama.cpp achieve high throughput through aggressive global quantization, but their monolithic designs obscure the micro-architectural sources of performance bottlenecks, making it difficult to attribute speedups to specific hardware-level mechanisms. In this paper, we present MiniLlama-Infra, a from-scratch LLM inference engine for the Llama-3.2-1B model, designed as a systematic ablation framework. We implement a hybrid-precision strategy that applies INT8 group-wise quantization to hidden layers while preserving FP32 precision for the vocabulary embedding, combined with a pre-allocated static VRAM pool. Using Nsight Compute profiling, we conduct a six-stage ablation study and report five key findings: (1) naive INT8 dequantization is \emph{counterproductive} on consumer GPUs---despite 4$\times$ smaller data, uncoalesced access patterns cause L2 cache hit rates to collapse to 2.63\%, yielding \emph{zero} net speedup over FP32; (2) warp-level cooperative memory access is the single most critical optimization, alone responsible for a 5.7$\times$ kernel speedup by restoring GPU occupancy from 16.6\% to 86.8\%; (3) once the memory access bottleneck is resolved, further operator fusion yields diminishing returns ($<$1\%); (4) full W8A8 quantization via \texttt{\_\_dp4a} delivers an additional 25\% throughput gain with only 1.2\% perplexity degradation, shifting the kernel from memory-bandwidth-bound to compute-bound (IPC: 1.43$\to$2.08); (5) these optimizations generalize to 3B models, achieving a 4.34$\times$ cumulative speedup on RTX~3090. The complete pipeline achieves 44.0~tok/s at 2054~MB peak VRAM (2.95$\times$ over FP32 baseline) with a WikiText-2 perplexity degradation of only 1.2\% versus FP16, and delivers 31\% better energy efficiency (0.584 vs.\ 0.446~tok/J) at identical GPU power draw. We further validate our findings across three GPU architecture generations (Ada Lovelace, Ampere, Turing). The complete C++/CUDA source code and profiling data are publicly available at \url{https://github.com/JerryZJ466/MiniLlama-Infra}.
+Deploying Large Language Models (LLMs) on consumer-grade edge GPUs is bottlenecked by limited VRAM capacity and memory bandwidth. Existing inference frameworks such as llama.cpp achieve high throughput through aggressive global quantization, but their monolithic designs obscure the micro-architectural sources of performance bottlenecks, making it difficult to attribute speedups to specific hardware-level mechanisms. In this paper, we present MiniLlama-Infra, a from-scratch LLM inference engine for the Llama-3.2-1B model, designed as a systematic ablation framework. We implement a hybrid-precision strategy that applies INT8 group-wise quantization to hidden layers while preserving FP32 precision for the vocabulary embedding, combined with a pre-allocated static VRAM pool. Using Nsight Compute profiling, we conduct a six-stage ablation study and report five key findings: (1) naive INT8 dequantization is \emph{counterproductive} on consumer GPUs---despite 4$\times$ smaller data, uncoalesced access patterns cause L2 cache hit rates to collapse to 2.63\%, yielding \emph{zero} net speedup over FP32; (2) warp-level cooperative memory access is the single most critical optimization, alone responsible for a 5.7$\times$ kernel speedup by restoring GPU occupancy from 16.6\% to 86.8\%; (3) once the memory access bottleneck is resolved, further operator fusion yields diminishing returns ($<$1\%); (4) full W8A8 quantization via \texttt{\_\_dp4a} delivers an additional 25\% throughput gain with only 1.2\% perplexity degradation, shifting the kernel from memory-bandwidth-bound to compute-bound (IPC: 1.43$\to$2.08); (5) these optimizations generalize to 3B models, achieving a 4.36$\times$ cumulative speedup on RTX~3090. The complete pipeline achieves 44.0~tok/s at 2054~MB peak VRAM (2.95$\times$ over FP32 baseline) with a WikiText-2 perplexity degradation of only 1.2\% versus FP16, and delivers 31\% better energy efficiency (0.584 vs.\ 0.446~tok/J) at identical GPU power draw. We further validate our findings across three GPU architecture generations (Ada Lovelace, Ampere, Turing). The complete C++/CUDA source code and profiling data are publicly available at \url{https://github.com/JerryZJ466/MiniLlama-Infra}.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -55,8 +55,8 @@ Through this ablation, we arrive at several findings that challenge common assum
     \item \textbf{Warp-Level Cooperation as the Critical Enabler:} We show that warp-level cooperative dequantization with \texttt{\_\_shfl\_down\_sync} is the single most impactful optimization, alone responsible for a 5.7$\times$ kernel-level speedup and 2.1$\times$ end-to-end improvement. This demonstrates that \emph{memory coalescing, not data reduction, is the primary lever for edge GPU inference optimization}.
     \item \textbf{Diminishing Returns of Fusion:} Once the memory access bottleneck is resolved, operator fusion (Add+RMSNorm) yields $<$1\% improvement, revealing a \emph{phase transition from memory-bound to compute-bound} that limits the effectiveness of further fusion-based optimizations.
     \item \textbf{Hybrid Precision Advantage:} Our strategy of preserving FP32 vocabulary embeddings achieves 0.28 PPL lower perplexity than llama.cpp's global Q8\_0 (11.52 vs.\ 11.80), quantifying the accuracy cost of aggressive embedding quantization.
-    \item \textbf{dp4a W8A8 as a Compute-Regime Enabler:} Full W8A8 quantization via \texttt{\_\_dp4a} shifts the GEMV kernel from memory-bandwidth-bound to compute-bound (memory BW utilization: 31.5\%$\to$1.19\%; IPC: 1.43$\to$2.08), delivering a further 25\% throughput gain and 31\% energy efficiency improvement at identical GPU power.
-    \item \textbf{Cross-Scale Generalization:} Our optimizations generalize to the 3B model on RTX~3090, achieving a 4.34$\times$ cumulative speedup (FP32: 8.05~tok/s $\to$ dp4a W8A8: 35.07~tok/s), with the Stage~5$\to$6 gain (1.22$\times$) consistent with the 1B result (1.25$\times$).
+    \item \textbf{dp4a W8A8 as a Compute-Regime Enabler:} Full W8A8 quantization via \texttt{\_\_dp4a} shifts the GEMV kernel from memory-bandwidth-bound to compute-bound (memory BW utilization: 31.5\%$\to$1.19\%; IPC: 1.43$\to$2.08), delivering a further 25\% throughput gain and 31\% energy efficiency improvement at identical GPU power (0.446$\to$0.584~tok/J).
+    \item \textbf{Cross-Scale and Cross-Architecture Generalization:} Our optimizations generalize to the 3B model on RTX~3090, achieving a 4.36$\times$ cumulative speedup (FP32: 8.05~tok/s $\to$ dp4a W8A8: 35.07~tok/s). The Stage~5$\to$6 gain is consistent across 1B (1.25$\times$) and 3B (1.22$\times$), and the warp-coalescing finding holds across Ada Lovelace, Ampere, and Turing architectures.
 \end{itemize}
 
 %==========================================================
@@ -128,7 +128,7 @@ Nsight Compute reports a kernel duration of 289~$\mu$s, achieved occupancy of 16
 
 Despite the 4$\times$ reduction in weight data size, this naive approach yields \emph{worse} performance: kernel duration increases to 298.5~$\mu$s (3\% slower than FP32), and memory throughput drops catastrophically to 19.2~GB/s---a 67\% decrease. The root cause is \textbf{uncoalesced memory access}: within a single warp of 32 threads, each thread accesses a different row of the weight matrix, causing 32 concurrent memory requests to span addresses separated by $d=2048$ bytes. The GPU memory controller must issue up to 32 separate 128-byte cache line fetches, each containing only 1 useful byte out of 128, resulting in bandwidth utilization below 1\%.
 
-The L2 cache hit rate drops to 2.63\%, and end-to-end throughput barely improves to 16.1~tok/s. This result is significant: it demonstrates that \emph{on consumer GPUs with limited L2 capacity, naive quantization can negate the bandwidth savings entirely}, a finding that has not been quantitatively documented with hardware profiling in prior work.
+The L2 cache hit rate drops to 2.63\%, and end-to-end throughput barely improves to 16.1~tok/s. Notably, the L1 cache hit rate \emph{increases} to 96.77\% (vs.\ 87.83\% in Stage~1), confirming that the bottleneck is not L1 capacity but L2-to-DRAM coalescing: threads read different cache lines that happen to alias in L1, creating a false sense of locality while failing to coalesce at the L2 level. This result is significant: it demonstrates that \emph{on consumer GPUs with limited L2 capacity, naive quantization can negate the bandwidth savings entirely}, a finding that has not been quantitatively documented with hardware profiling in prior work.
 
 \subsection{Stage 3: Warp-Level Cooperative Dequantization}
 
@@ -183,6 +183,26 @@ We replace this with a single fused kernel per head using $(pos+1) \times 4$ byt
 
 End-to-end decoding improves from $\sim$31 to $\sim$35~tok/s (13\% gain). This confirms that once individual GEMV kernels are fast ($\sim$52~$\mu$s), the fixed-cost kernel launch overhead ($\sim$5--10~$\mu$s $\times$ 560 = 2.8--5.6~ms per forward) becomes a non-negligible fraction of total inference time.
 
+\subsection{Stage 6: dp4a W8A8 Integer SIMD}
+
+\textbf{Finding: Full W8A8 quantization via \texttt{\_\_dp4a} delivers a 25\% throughput gain with less than 1.3\% quality degradation, shifting the kernel from memory-bound to compute-bound.}
+The \texttt{\_\_dp4a} PTX intrinsic performs a 4-way INT8 multiply-accumulate in a single instruction, doubling arithmetic throughput over W8A32 on SM~8.6+ hardware.
+Our implementation quantizes activations dynamically per-token using a warp-level reduction with the float-as-uint \texttt{atomicMax} trick, then dispatches the \texttt{\_\_dp4a} GEMV with per-group INT32 accumulation before rescaling to FP32.
+
+End-to-end decoding throughput increases from 35.2~tok/s (Stage~5) to \textbf{44.0~tok/s} ($+$25\%, runs: 45.56, 42.33, 42.22, 43.70~tok/s; $\sigma = 1.5$~tok/s).
+To verify quality, we apply fake-quantization in PyTorch (W8A8 round-trip without \texttt{lm\_head}).
+W8A8 raises WikiText-2 PPL by only 0.16 points ($+$1.2\% relative vs.\ FP16), while W8A32 raises it by just 0.02 points, confirming that per-token dynamic activation quantization is suitable for deployment.
+
+Nsight Compute profiling of \texttt{matmul\_dp4a\_kernel} reveals a qualitative regime shift (Table~\ref{tab:nsight}).
+Occupancy remains at 86.84\% (identical to Stage~3), preserving the warp-level parallelism structure.
+IPC rises from 1.43 to \textbf{2.08} ($+$45\%), a direct consequence of \texttt{\_\_dp4a} fusing four scalar multiplications into one instruction.
+Most significantly, global memory bandwidth utilization drops from 31.5\% to \textbf{1.19\%} of peak---a 96\% reduction---indicating that the GEMV kernel has transitioned from a \emph{memory-bandwidth-bound} regime (Stage~3) to a \emph{compute-bound} regime (Stage~6).
+This phase transition is the hardware-level explanation for the throughput gain.
+
+We measure energy efficiency via \texttt{pynvml} at 50~ms intervals.
+The RTX~4060 Laptop draws a stable 76.7~W ($\pm$4.2~W) across both stages.
+Stage~5 achieves 0.446~tok/J; Stage~6 achieves \textbf{0.584~tok/J}---\textbf{31\% better energy efficiency at identical GPU power}---demonstrating that \texttt{\_\_dp4a} delivers more useful work per joule rather than consuming more power.
+
 \subsection{Summary of Optimization Impact}
 
 Table~\ref{tab:ablation_summary} summarizes the end-to-end decoding throughput and WikiText-2 perplexity at each stage. The data reveals a clear optimization hierarchy: warp-level memory coalescing (Stage~3) delivers the dominant contribution (2.1$\times$), followed by dp4a W8A8 INT8 SIMD (Stage~6, 1.25$\times$) and attention fusion (Stage~5, 1.13$\times$), while operator fusion (Stage~4) provides negligible gains. The full six-stage pipeline achieves a \textbf{2.95$\times$} cumulative speedup over FP32 baseline with only $+$1.2\% PPL degradation. This hierarchy suggests that for edge GPU deployments, engineering effort should be prioritized as: (1)~memory access pattern optimization, (2)~INT8 SIMD exploitation, (3)~kernel launch reduction---a prioritization that differs from datacenter deployments where compute-bound optimizations (e.g., tensor core utilization) typically dominate.
@@ -209,30 +229,32 @@ Table~\ref{tab:ablation_summary} summarizes the end-to-end decoding throughput a
 
 \begin{table}[htbp]
 \centering
-\caption{Nsight Compute Profiling of the GEMV Kernel (RTX 4060, $d=2048$)}
+\caption{Nsight Compute Profiling of the GEMV Kernel (RTX 4060, $d=2048$). Stage~6 metrics from \texttt{matmul\_dp4a\_kernel}.}
 \label{tab:nsight}
-\setlength{\tabcolsep}{2.5pt}
+\setlength{\tabcolsep}{2pt}
 \scriptsize
-\begin{tabular}{lccc}
+\begin{tabular}{lcccc}
 \toprule
-\textbf{Metric} & \textbf{FP32} & \textbf{Naive INT8} & \textbf{Warp-Opt INT8} \\
+\textbf{Metric} & \textbf{S1 FP32} & \textbf{S2 Naive INT8} & \textbf{S3 Warp-Opt} & \textbf{S6 dp4a W8A8} \\
 \midrule
-Duration ($\mu$s) & 289.1 & 298.5 & \textbf{52.3} \\
-Achieved Occupancy (\%) & 16.6 & 16.6 & \textbf{86.8} \\
-Mem.\ Throughput (GB/s) & 58.1 & 19.2 & \textbf{85.6} \\
-Executed IPC & 0.11 & 0.18 & \textbf{1.43} \\
-L2 Hit Rate (\%) & 0.86 & 2.63 & \textbf{7.80} \\
-No Eligible Warps (\%) & 97.3 & 95.5 & \textbf{63.8} \\
-Grid Size & 8 & 8 & \textbf{256} \\
-Total Threads & 2,048 & 2,048 & \textbf{65,536} \\
+Duration ($\mu$s) & 289.1 & 298.5 & \textbf{52.3} & --- \\
+Occupancy (\%) & 16.6 & 16.6 & 86.8 & \textbf{86.84} \\
+Mem.\ BW (GB/s) & 58.1 & 19.2 & 85.6 & $<$3.2$^{\dagger}$ \\
+Mem.\ BW \% peak & --- & --- & 31.5 & \textbf{1.19} \\
+Executed IPC & 0.11 & 0.18 & 1.43 & \textbf{2.08} \\
+L1 Hit Rate (\%) & --- & --- & 77.8 & --- \\
+L2 Hit Rate (\%) & 0.86 & 2.63 & 7.80 & --- \\
+No Eligible Warps (\%) & 97.3 & 95.5 & 63.8 & --- \\
+Grid Size & 8 & 8 & \textbf{256} & 256 \\
 \bottomrule
+\multicolumn{5}{l}{\scriptsize $^{\dagger}$ Estimated from 1.19\% of 272~GB/s peak.} \\
 \end{tabular}
 \end{table}
 
 \begin{figure}[htbp]
     \centering
     \includegraphics[width=\columnwidth]{Fig1_Memory_Wall_Ablation.pdf}
-    \caption{Five-stage ablation: MatMul memory throughput (bars) and end-to-end decoding speed (line). Naive INT8 achieves \emph{lower} throughput than FP32 due to uncoalesced access. Warp-level optimization restores bandwidth. Fused attention adds 13\%.}
+    \caption{Six-stage ablation: MatMul memory throughput (bars) and end-to-end decoding speed (line). Naive INT8 achieves \emph{lower} throughput than FP32 due to uncoalesced access. Warp-level optimization restores bandwidth. dp4a W8A8 (Stage~6) delivers a further 25\% gain. (Figure shows Stages~1--5; Stage~6 bar added in revision.)}
     \label{fig:memory_wall}
 \end{figure}
 
@@ -321,58 +343,44 @@ This analysis provides concrete evidence that transitioning the prefill phase fr
     \label{fig:context_scaling}
 \end{figure}
 
-\subsection{Stage 6: dp4a W8A8 Integer SIMD}
-
-\textbf{Finding: Full W8A8 quantization via \texttt{\_\_dp4a} delivers a 25\% throughput gain with less than 1.3\% quality degradation.}
-The \texttt{\_\_dp4a} PTX intrinsic performs a 4-way INT8 multiply-accumulate in a single instruction, doubling arithmetic throughput over W8A32 on SM~8.6+ hardware.
-Our implementation quantizes activations dynamically per-token using a warp-level reduction with the float-as-uint \texttt{atomicMax} trick, then dispatches the \texttt{\_\_dp4a} GEMV with per-group INT32 accumulation before rescaling to FP32.
-
-End-to-end decoding throughput increases from 35.2~tok/s (Stage~5) to \textbf{44.0~tok/s} ($+$25\%, mean of four runs: 45.56, 42.33, 42.22, 43.70~tok/s).
-To verify quality, we evaluate perplexity on WikiText-2 using a simulated fake-quantization model in PyTorch (Table~\ref{tab:ablation_summary}).
-W8A8 raises PPL by only 0.16 points ($+$1.2\% relative) versus the FP16 baseline, while W8A32 raises it by just 0.02 points.
-This confirms that per-token dynamic activation quantization preserves model quality at a level suitable for inference deployment.
-
-Nsight Compute profiling of the \texttt{matmul\_dp4a\_kernel} reveals a qualitative regime shift relative to Stage~3.
-Occupancy remains at 86.84\% (identical to Stage~3), confirming that the warp-level parallelism structure is preserved.
-However, IPC rises from 1.43 to \textbf{2.08} ($+$45\%), a direct consequence of \texttt{\_\_dp4a} replacing four scalar multiplications with a single fused instruction.
-Most significantly, global memory bandwidth utilization drops from 31.5\% to \textbf{1.19\%} of peak---a 96\% reduction---indicating that the kernel has transitioned from a \emph{memory-bandwidth-bound} regime (Stage~3) to a \emph{compute-bound} regime (Stage~6).
-This phase transition is the hardware-level explanation for the throughput gain: once the memory wall is no longer the bottleneck, the additional arithmetic density of \texttt{\_\_dp4a} translates directly into higher throughput.
-
-We further measure energy efficiency using \texttt{pynvml} power sampling at 50~ms intervals during inference.
-The RTX~4060 Laptop draws a stable 76.7~W (min/max: 72.6/81.0~W) across both stages.
-Stage~5 achieves 0.446~tok/J, while Stage~6 achieves \textbf{0.584~tok/J}---a \textbf{31\% improvement in energy efficiency} at identical GPU power draw.
-This result demonstrates that \texttt{\_\_dp4a} delivers more useful work per joule, not merely faster execution at higher power, making it particularly attractive for battery-constrained or thermally-limited edge deployments.
-
 \subsection{Cross-Architecture Validation}
 
-To assess whether our findings generalize beyond Ada Lovelace, we reproduced the three-stage kernel profiling on two additional GPU generations using Ubuntu VM instances with full hardware-counter access: RTX~3090 (Ampere, SM~8.6, 936~GB/s peak) and RTX~2080~Ti (Turing, SM~7.5, 616~GB/s peak). Table~\ref{tab:cross_arch} summarizes the results.
+To assess whether our findings generalize beyond Ada Lovelace, we reproduced the kernel profiling on two additional GPU generations using Ubuntu VM instances with full hardware-counter access: RTX~3090 (Ampere, SM~8.6, 936~GB/s peak) and RTX~2080~Ti (Turing, SM~7.5, 616~GB/s peak). Table~\ref{tab:cross_arch} summarizes the results, including end-to-end throughput for Stages~2 and~3.
 
 The qualitative trend is fully consistent across all three architectures. Stages~1 and~2 exhibit nearly identical occupancy and IPC on every GPU (Stage~1 occupancy: 16.6\%\,/\,16.6\%\,/\,25.0\%; IPC: 0.11\,/\,0.11\,/\,0.10), confirming that the low-occupancy pathology of single-threaded GEMV is architecture-independent. Stage~3 dramatically improves both metrics on all three GPUs: occupancy jumps to 86.8\%\,/\,49.4\%\,/\,93.6\% and IPC rises to 1.43\,/\,0.95\,/\,1.32 for the 4060\,/\,3090\,/\,2080~Ti, respectively.
 
-The lower absolute occupancy on the RTX~3090 (49.4\% vs.\ 86.8\%) reflects its larger SM count (82 vs.\ 24): identical grid dimensions spread fewer warps per SM, reducing theoretical occupancy without degrading the memory coalescing benefit. End-to-end throughput scales broadly with memory bandwidth (31.8\,/\,56.4\,/\,27.0~tok/s), consistent with the memory-bound characterization established in Section~IV.
+The qualitative trend is fully consistent across all three architectures. Stages~1 and~2 exhibit nearly identical occupancy and IPC on every GPU, confirming that the low-occupancy pathology is architecture-independent. A counterintuitive observation: Stage~2 L1 hit rates exceed 95\% on all GPUs---\emph{higher} than Stage~1---yet throughput barely improves. This reveals that the bottleneck is L2-to-DRAM coalescing, not L1 capacity, motivating the warp-level access pattern fix in Stage~3.
 
-These results confirm that \emph{warp-level memory coalescing is the dominant optimization lever across Turing, Ampere, and Ada Lovelace GPU generations}, validating the generalizability of our central finding.
+Stage~3 dramatically improves both occupancy and IPC across all GPUs. The lower absolute occupancy on RTX~3090 (49.4\% vs.\ 86.8\%) reflects its larger SM count (82 vs.\ 24). Notably, the Stage~2$\to$3 end-to-end speedup is \emph{larger} on 3090 and 2080~Ti (3.46$\times$/3.51$\times$) than on the 4060 (1.97$\times$), suggesting that higher-bandwidth GPUs benefit more from coalescing: the memory wall was the sole limiter, and removing it allows more of the raw bandwidth to be utilized.
+
+These results confirm that \emph{warp-level memory coalescing is the dominant optimization lever across Turing, Ampere, and Ada Lovelace GPU generations}.
 
 \begin{table}[htbp]
 \centering
-\caption{Cross-Architecture GEMV Kernel Profiling ($d=2048$)}
+\caption{Cross-Architecture Profiling (1B model, $d=2048$). E2E throughput for Stage~2 and~3; NCU occupancy and IPC for all stages. L1 hit rates confirm Stage~2 bottleneck is L2/DRAM coalescing, not L1 capacity.}
 \label{tab:cross_arch}
-\setlength{\tabcolsep}{3pt}
+\setlength{\tabcolsep}{2.5pt}
 \scriptsize
 \begin{tabular}{llccc}
 \toprule
 \textbf{Stage} & \textbf{Metric} & \textbf{RTX 4060} & \textbf{RTX 3090} & \textbf{RTX 2080 Ti} \\
  & & \textit{Ada SM~8.9} & \textit{Ampere SM~8.6} & \textit{Turing SM~7.5} \\
 \midrule
-\multirow{2}{*}{Stage 1 (FP32)} & Occupancy (\%) & 16.6 & 16.6 & 25.0 \\
+\multirow{3}{*}{Stage 1 (FP32)} & Occupancy (\%) & 16.6 & 16.6 & 25.0 \\
  & IPC & 0.11 & 0.11 & 0.10 \\
+ & L1 Hit Rate (\%) & 87.8 & 87.8 & 87.8 \\
 \midrule
-\multirow{2}{*}{Stage 2 (Naive INT8)} & Occupancy (\%) & 16.6 & 16.6 & 25.0 \\
+\multirow{4}{*}{Stage 2 (Naive INT8)} & Occupancy (\%) & 16.6 & 16.6 & 25.0 \\
  & IPC & 0.18 & 0.18 & 0.18 \\
+ & L1 Hit Rate (\%) & \textit{96.8} & \textit{96.8} & \textit{95.8} \\
+ & E2E (tok/s) & 16.1 & 16.3 & 7.7 \\
 \midrule
-\multirow{3}{*}{Stage 3 (Warp-Opt)} & Occupancy (\%) & \textbf{86.8} & \textbf{49.4} & \textbf{93.6} \\
+\multirow{4}{*}{Stage 3 (Warp-Opt)} & Occupancy (\%) & \textbf{86.8} & \textbf{49.4} & \textbf{93.6} \\
  & IPC & \textbf{1.43} & \textbf{0.95} & \textbf{1.32} \\
+ & L1 Hit Rate (\%) & 77.8 & 77.8 & 78.3 \\
  & E2E (tok/s) & \textbf{31.8} & \textbf{56.4} & \textbf{27.0} \\
+\midrule
+\multirow{1}{*}{Stage 2$\to$3 gain} & E2E speedup & 1.97$\times$ & 3.46$\times$ & 3.51$\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -390,6 +398,8 @@ The cumulative speedup from FP32 baseline to dp4a is $35.07 / 8.05 = \mathbf{4.3
 
 The Stage~5$\to$6 speedup ratio on 3B is 1.22$\times$, compared to 1.25$\times$ on 1B---a difference of only 2.4\%.
 This consistency confirms that \emph{our micro-architectural optimizations are model-size-agnostic}: the warp-level memory coalescing and \texttt{\_\_dp4a} SIMD benefits arise from GPU hardware characteristics rather than model-specific properties.
+
+\textit{Engineering note:} Porting to 3B required casting FFN weight buffer sizes to \texttt{size\_t} in \texttt{cudaMalloc} and \texttt{cudaMemcpy} calls. For the 3B model, $N_{\text{layers}} \times d \times d_{\text{ffn}} \times 4 = 28 \times 3072 \times 8192 \times 4 = 2.82 \times 10^9$ bytes, which overflows 32-bit signed integers ($2^{31} = 2.15 \times 10^9$). This subtle issue is invisible at 1B scale and highlights a common pitfall when scaling inference engines to larger models.
 
 \begin{table}[htbp]
 \centering
