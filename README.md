@@ -1,65 +1,11 @@
 # MiniLlama-Infra
 
-A from-scratch CUDA inference engine for **Llama-3.2-1B** on consumer GPUs, built as a **micro-architecture ablation framework** for edge LLM deployment.
+A from-scratch CUDA/C++ inference engine for **Llama-3.2-1B** on consumer GPUs, built as a
+**six-stage micro-architecture ablation framework** for edge LLM deployment.
 
 > **Paper:** *MiniLlama-Infra: A Micro-Architecture Ablation Study of Edge LLM Inference on Consumer GPUs*  
 > Zijian Zhang, East China Normal University  
-> [arXiv link — coming soon]
-
----
-
-## Browse Code by Ablation Stage
-
-Each optimization stage is preserved as a git tag. Checkout any tag to see the exact kernel code for that stage:
-
-```bash
-git checkout v1-fp32-baseline   # Stage 1 — FP32 GEMV, 14.9 tok/s, 16.6% occupancy
-git checkout v2-int8-warp-opt   # Stage 3 — Warp-Opt INT8, 31 tok/s, 86.8% occupancy
-git checkout v3-full-optimized  # Stage 4+5 — Fused Add+RMSNorm + Fused Attention, 35.2 tok/s
-```
-
-> **Note:** Stage 2 (Naive INT8) does not have a separate tag — the naive kernel remains in `src/model_cuda_v2_shared.cu` alongside the optimized version as `matmul_int8_group_kernel_naive` for direct comparison.
-
----
-
-## Key Findings
-
-This project is not about chasing SOTA throughput. The goal is to precisely measure *why* each optimization works at the hardware level using NVIDIA Nsight Compute profiling.
-
-**Finding 1 — The Naive INT8 Trap:**  
-Replacing FP32 weights with INT8 *without* changing the kernel layout makes things **worse**: memory throughput drops from 58.1 → 19.2 GB/s (−67%) due to catastrophic uncoalesced access. L2 hit rate collapses to 2.63%. Zero net speedup despite 4× smaller data.
-
-**Finding 2 — Warp-Level Cooperation is the Critical Enabler:**  
-Restructuring the kernel so 32 threads cooperatively compute one output row (coalesced loads + `__shfl_down_sync` warp reduce) delivers a **5.7× kernel speedup**, restoring GPU occupancy from 16.6% → 86.8%. This alone doubles end-to-end throughput from ~15 to ~31 tok/s.
-
-**Finding 3 — Diminishing Returns After Coalescing:**  
-Once the memory bottleneck is resolved, the system enters a compute-bound regime. Fusing Add+RMSNorm yields <1% improvement — the phase transition is the finding, not the optimization.
-
----
-
-## Ablation Results (RTX 4060 Laptop, Llama-3.2-1B, d=2048)
-
-| Stage | Kernel Duration | Mem. Throughput | Occupancy | End-to-End |
-|-------|:-:|:-:|:-:|:-:|
-| FP32 Baseline | 289.1 μs | 58.1 GB/s | 16.6% | 14.9 tok/s |
-| Naive INT8 | 298.5 μs | 19.2 GB/s | 16.6% | 16.1 tok/s |
-| Warp-Opt INT8 | **52.3 μs** | **85.6 GB/s** | **86.8%** | ~31 tok/s |
-| + Fused Add+RMSNorm | — | — | 75.1% | ~31 tok/s |
-| + Fused Attention | — | — | — | **35.2 tok/s** |
-
-Full Nsight Compute metrics are in [`Float32_raw.csv`](Float32_raw.csv), [`naive_raw.csv`](naive_raw.csv), [`optimized_raw.csv`](optimized_raw.csv), [`fused_raw.csv`](fused_raw.csv).
-
----
-
-## End-to-End Comparison
-
-| Framework | Precision | Peak VRAM | Throughput | WikiText-2 PPL |
-|-----------|:-:|:-:|:-:|:-:|
-| PyTorch (HuggingFace) | FP16 | 2377 MB | 59.3 tok/s | 11.50 |
-| llama.cpp | Q8_0 (global) | 1252 MB | 144.9 tok/s | 11.80 |
-| **MiniLlama-Infra (ours)** | **INT8+FP32** | **2054 MB** | **35.2 tok/s** | **11.52** |
-
-Our hybrid-precision strategy (INT8 for hidden layers, FP32 for vocabulary embedding) achieves 0.28 PPL lower than llama.cpp's global Q8_0, at 13.6% lower VRAM than PyTorch.
+> Target venues: IISWC 2026 / ISPASS 2027
 
 ---
 
@@ -67,30 +13,132 @@ Our hybrid-precision strategy (INT8 for hidden layers, FP32 for vocabulary embed
 
 ![System Architecture](Fig0_Architecture_v2.png)
 
-Three optimization points:
-- **Red** — Warp-level cooperative INT8 GEMV with on-the-fly dequantization
-- **Blue** — Fused Add+RMSNorm kernel (eliminates one global memory round-trip)
-- **Green** — Fused attention (QK·Softmax·V in shared memory, reduces 560 kernel launches to 16)
+The engine implements the full Llama-3.2 transformer (16 layers, d=2048) from scratch in CUDA,
+with a pre-allocated 2054 MB VRAM pool and memory-mapped weight loading (zero-copy, cross-platform).
+Four targeted optimizations are highlighted: warp-level cooperative GEMV (S3),
+fused Add+RMSNorm (S4), fused attention (S5), and dp4a W8A8 quantization (S6).
+
+---
+
+## Six-Stage Ablation (RTX 4060 Laptop, Llama-3.2-1B)
+
+| Stage | Description | Tok/s | Cumul. Speedup | MatMul Mem BW | Occupancy |
+|-------|-------------|------:|:--------------:|:-------------:|:---------:|
+| S1 | FP32 baseline | 14.9 | 1.00x | 58.1 GB/s | 16.6% |
+| S2 | Naive INT8 | 16.1 | 1.08x | 19.2 GB/s | 16.6% |
+| S3 | Warp-Opt INT8 | **31.8** | **2.13x** | 85.6 GB/s | **86.8%** |
+| S4 | + Fused Add+RMSNorm | 30.0 | 2.01x | 85.6 GB/s | 75.1% |
+| S5 | + Fused Attention | 35.2 | 2.36x | 85.6 GB/s | — |
+| S6 | + dp4a W8A8 | **44.0** | **2.95x** | 3.2 GB/s (compute-bound) | — |
+
+**WikiText-2 PPL (stride=2048):** FP16 13.20 -> W8A32 13.22 (+0.15%) -> W8A8 13.36 (+1.23%)  
+**Energy efficiency (76.7 W GPU):** S5 -> 0.446 tok/J, S6 -> 0.584 tok/J (**+31%**)
+
+---
+
+## Figures
+
+| Memory Wall Ablation | Roofline Model |
+|:---:|:---:|
+| ![Fig1](Fig1_Memory_Wall_Ablation.png) | ![Fig2](Fig2_Roofline_Model.png) |
+
+| Context Scaling | Energy Efficiency |
+|:---:|:---:|
+| ![Fig3](Fig3_Context_Scaling.png) | ![Fig5](Fig5_Energy_Efficiency.png) |
+
+---
+
+## Key Findings
+
+**Finding 1 — The Naive INT8 Trap:**  
+Replacing FP32 weights with INT8 *without* changing the kernel layout makes things **worse**:
+memory throughput drops 58.1 -> 19.2 GB/s (−67%) due to uncoalesced access.
+L2 hit rate collapses to 2.63%. Zero net speedup despite 4x smaller data.
+
+**Finding 2 — Warp-Level Cooperation is the Critical Enabler:**  
+Restructuring the kernel so 32 threads cooperatively compute one output row
+(coalesced loads + `__shfl_down_sync` warp reduce) delivers a **5.7x kernel speedup**,
+restoring occupancy 16.6% -> 86.8% and doubling end-to-end throughput 15 -> 31.8 tok/s.
+
+**Finding 3 — Diminishing Returns After Coalescing:**  
+Once the memory bottleneck is resolved, fusing Add+RMSNorm yields <1% improvement —
+the phase transition is the finding, not the optimization.
+
+**Finding 4 — dp4a Regime Shift:**  
+`__dp4a` W8A8 quantization (per-token dynamic activations + per-group static weights)
+shifts arithmetic intensity from ~1 to ~7 Ops/Byte, moving the workload from
+memory-bound to compute-bound and delivering a further **+25% speedup** (35.2 -> 44.0 tok/s)
+at the same 76.7 W GPU power draw, improving energy efficiency by 31%.
+
+---
+
+## Cross-Architecture Validation
+
+The warp-level optimization generalizes across three GPU generations:
+
+| GPU | Architecture | SM | S3 Warp-Opt | S6 dp4a W8A8 |
+|-----|-------------|-----|:-----------:|:------------:|
+| RTX 4060 Laptop | Ada Lovelace | 8.9 | 31.8 tok/s | 44.0 tok/s |
+| RTX 3090 | Ampere | 8.6 | ~30 tok/s | ~42 tok/s |
+| RTX 2080 Ti | Turing | 7.5 | ~27 tok/s | — |
+
+Qualitative trends (memory throughput uplift, occupancy recovery) are fully consistent
+across all three architectures, confirming the optimizations target hardware fundamentals
+rather than Ada-specific features.
+
+---
+
+## 3B Model Validation (RTX 3090, Llama-3.2-3B)
+
+| Stage | Tok/s | Cumul. Speedup |
+|-------|------:|:--------------:|
+| S1 FP32 baseline | 8.05 | 1.00x |
+| S3 Warp-Opt INT8 | 28.71 | 3.57x |
+| S6 dp4a W8A8 | **35.07** | **4.36x** |
+
+The 4.36x cumulative speedup on 3B exceeds the 2.95x on 1B, as larger hidden dimensions
+(d=3072 vs d=2048) increase arithmetic intensity and amplify the benefit of compute-bound kernels.
+
+---
+
+## Browse Code by Ablation Stage
+
+Each optimization stage is preserved as a git tag:
+
+```bash
+git checkout v1-fp32-baseline    # S1 -- FP32 GEMV, 14.9 tok/s
+git checkout v2-int8-warp-opt    # S3 -- Warp-Opt INT8, 31.8 tok/s, 86.8% occupancy
+git checkout v3-full-optimized   # S4+S5 -- Fused Add+RMSNorm + Fused Attention, 35.2 tok/s
+```
+
+> S2 (Naive INT8) is in `src/model_cuda_v2_shared.cu` as `matmul_int8_group_kernel_naive`
+> alongside the optimized kernel for direct comparison.
 
 ---
 
 ## Project Structure
 
 ```
-├── src/
-│   ├── model_cuda_v2_shared.cu   # All CUDA kernels (GEMV, attention, norms, fusion)
-│   ├── main_cuda.cpp             # Inference engine, benchmark harness, context scaling
-│   └── tokenizer.cpp             # BPE tokenizer
-├── include/
-│   ├── config.h                  # Model config (dims, layers, vocab size)
-│   ├── model.h                   # GPU state structs, weight layout
-│   └── tokenizer.h
-├── quantize_int8_group.py        # Convert HuggingFace weights → INT8 group-64 .bin
-├── eval_ppl.py                   # WikiText-2 perplexity evaluation (simulated quantization)
-├── benchmark_hf.py               # PyTorch baseline benchmark
-├── plot_paper_figs.py            # Reproduce all paper figures from CSV data
-├── *_raw.csv                     # Raw Nsight Compute exports for each ablation stage
-└── conference_101719.tex         # Paper source (IEEEtran)
+src/
+  model_cuda_v2_shared.cu   # All CUDA kernels (GEMV, dp4a, attention, norms, fusion)
+  main_cuda.cpp             # Inference engine, benchmark harness, context scaling
+  tokenizer.cpp             # BPE tokenizer (Llama 3.2 vocabulary)
+include/
+  config.h                  # Model config (dims, layers, vocab size)
+  model.h                   # GPU state structs, weight layout
+  tokenizer.h
+quantize_int8_group.py      # Convert HuggingFace weights -> INT8 group-64 .bin
+quantize_int8_group_3B.py   # Same for 3B model (with size_t overflow fix)
+eval_ppl.py                 # WikiText-2 PPL evaluation (stride=2048)
+measure_energy.py           # pynvml energy efficiency measurement
+fig1_system.tex             # TikZ system architecture diagram
+fig3_throughput_energy.py   # Fig5: Energy efficiency figure
+fig4_six_stage_ablation.py  # Fig1: Six-stage ablation figure
+fig5_roofline.py            # Fig2: Extended roofline model
+fig6_ttft_scaling.py        # Fig3: Context scaling figure
+plot_paper_figs.py          # Fig4: Memory access pattern diagram
+minillama_infra.tex         # Paper source (IEEEtran two-column)
+cloud_results.txt           # Complete experiment data archive
 ```
 
 ---
@@ -100,31 +148,30 @@ Three optimization points:
 **Requirements:** CUDA 12+, Visual Studio (Windows) or GCC (Linux), NVCC
 
 ```bash
-# Windows (from project root, in Developer Command Prompt)
-nvcc -o build/mini_llama_infra.exe src/main_cuda.cpp src/model_cuda_v2_shared.cu src/tokenizer.cpp \
+# Windows (Developer Command Prompt)
+nvcc -o build/mini_llama_infra.exe \
+     src/main_cuda.cpp src/model_cuda_v2_shared.cu src/tokenizer.cpp \
      -Xcompiler "/utf-8" -arch=sm_89
 
-# Linux (replace -Xcompiler flag)
-nvcc -o build/mini_llama_infra src/main_cuda.cpp src/model_cuda_v2_shared.cu src/tokenizer.cpp \
+# Linux
+nvcc -o build/mini_llama_infra \
+     src/main_cuda.cpp src/model_cuda_v2_shared.cu src/tokenizer.cpp \
      -arch=sm_89
 ```
 
-The `-arch=sm_89` flag targets Ada Lovelace (RTX 4060/4070/4080/4090). Change to `sm_86` for Ampere (RTX 3xxx).
+Change `-arch=sm_89` (Ada RTX 40xx) to `sm_86` (Ampere RTX 30xx) or `sm_75` (Turing RTX 20xx).
 
 ---
 
 ## Prepare Model Weights
 
-You need the Llama-3.2-1B weights in our custom binary format.
-
 ```bash
-# 1. Download the HuggingFace model
-python downloadmodel.py   # requires HF token with Llama-3.2 access
+# 1. Download HuggingFace model (requires Llama-3.2 access)
+python downloadmodel.py
 
 # 2. Quantize to INT8 group-64 format
 python quantize_int8_group.py
-# Outputs: llama3_2_1B_q8_group.bin (~1.3 GB)
-# Also needs: tokenizer.bin (copy from HF model files)
+# Output: llama3_2_1B_q8_group.bin (~1.3 GB)
 ```
 
 ---
@@ -132,52 +179,22 @@ python quantize_int8_group.py
 ## Run
 
 ```bash
-# Run benchmark (4 prompts, 128 tokens each)
-./build/mini_llama_infra
+# Benchmark: 4 prompts, 128 tokens each
+./build/mini_llama_infra path/to/llama3_2_1B_q8_group.bin
 
-# Expected output:
+# Expected (RTX 4060 Laptop, S6):
 # Peak VRAM: 2054 MB
-# Throughput: ~35 tok/s
+# Throughput: ~44 tok/s
 ```
-
----
-
-## Reproduce Paper Figures
-
-```bash
-# Requires: matplotlib, pandas
-python plot_paper_figs.py
-# Generates Fig1–Fig3 from the raw Nsight CSV exports
-```
-
----
-
-## Perplexity Evaluation
-
-```bash
-# Requires: transformers, torch, datasets
-# Uses simulated (fake) INT8 quantization on HuggingFace model
-python eval_ppl.py
-# Expected: FP16 baseline 11.50 | INT8 group-64 11.52
-```
-
----
-
-## Hardware Notes
-
-All profiling was done on **NVIDIA GeForce RTX 4060 Laptop GPU** (Ada Lovelace, SM 8.9, 8 GB GDDR6, 272 GB/s peak bandwidth). Kernel-level metrics may differ on other architectures but the memory access patterns generalize across consumer GPUs.
 
 ---
 
 ## Citation
 
-If you use this code or findings, please cite:
-
 ```bibtex
 @article{zhang2025minillama,
   title={MiniLlama-Infra: A Micro-Architecture Ablation Study of Edge LLM Inference on Consumer GPUs},
   author={Zhang, Zijian},
-  journal={arXiv preprint},
   year={2025}
 }
 ```

@@ -170,7 +170,7 @@ def plot_memory_access_diagram():
     # ─── Left: Naive INT8 ───
     ax = ax_naive
     ax.set_xlim(-0.5, 7.5)
-    ax.set_ylim(-0.3, 4.0)
+    ax.set_ylim(-0.45, 4.2)
     ax.set_aspect('equal')
     ax.axis('off')
     ax.set_title('Stage 2: Naive INT8\n(Uncoalesced Access)', fontsize=11,
@@ -184,7 +184,7 @@ def plot_memory_access_diagram():
         ax.add_patch(rect)
         ax.text(mx + 0.4, 0.32, f'Row {i}', ha='center', va='center', fontsize=6.5)
 
-    ax.text(3.5, -0.2, '← stride = 2048 bytes →', ha='center', fontsize=8,
+    ax.text(3.5, -0.4, '← stride = 2048 bytes →', ha='center', fontsize=8,
             color='#C0392B', style='italic')
 
     # Threads
@@ -208,16 +208,18 @@ def plot_memory_access_diagram():
                     arrowprops=dict(arrowstyle='->', color='#E74C3C',
                                    lw=1.2, connectionstyle='arc3,rad=0.3'))
 
-    ax.text(3.5, 1.6, '32 cache-line fetches\n(1 byte used each)', ha='center',
+    # Move annotation ABOVE the arrow zone (arrows go from y=2.6 down to y=0.55)
+    ax.text(3.5, 3.65, '32 cache-line fetches\n(1 byte used each)', ha='center',
             fontsize=8.5, color='#C0392B', fontweight='bold',
             bbox=dict(boxstyle='round,pad=0.3', facecolor='#FDEDEC', edgecolor='#E74C3C'))
-    ax.text(3.5, 0.85, '19.2 GB/s  |  L2 hit 2.6%', ha='center', fontsize=9,
+    # Performance stats — between memory blocks and stride label
+    ax.text(3.5, -0.18, '19.2 GB/s  |  L2 hit 2.6%', ha='center', fontsize=9,
             color='#C0392B', fontweight='bold')
 
     # ─── Right: Warp-Opt INT8 ───
     ax = ax_warp
     ax.set_xlim(-0.5, 7.5)
-    ax.set_ylim(-0.3, 4.0)
+    ax.set_ylim(-0.45, 4.2)
     ax.set_aspect('equal')
     ax.axis('off')
     ax.set_title('Stage 3: Warp-Opt INT8\n(Coalesced Access)', fontsize=11,
@@ -236,7 +238,7 @@ def plot_memory_access_diagram():
                             linewidth=2, edgecolor='#1E8449',
                             facecolor='none', linestyle='--', zorder=3)
     ax.add_patch(brace_rect)
-    ax.text(3.7, -0.2, '← 128-byte coalesced transaction →', ha='center',
+    ax.text(3.7, -0.43, '← 128-byte coalesced transaction →', ha='center',
             fontsize=8, color='#1E8449', style='italic')
 
     # Threads
@@ -258,10 +260,10 @@ def plot_memory_access_diagram():
         ax.annotate('', xy=(mx, 0.55), xytext=(tx, 2.6),
                     arrowprops=dict(arrowstyle='->', color='#1E8449', lw=1.5))
 
-    ax.text(3.5, 1.6, '1 cache-line fetch\n(128 bytes, all used)', ha='center',
+    ax.text(3.5, 3.65, '1 cache-line fetch\n(128 bytes, all used)', ha='center',
             fontsize=8.5, color='#1E8449', fontweight='bold',
             bbox=dict(boxstyle='round,pad=0.3', facecolor='#EAFAF1', edgecolor='#1E8449'))
-    ax.text(3.5, 0.85, '85.6 GB/s  |  5.7× speedup', ha='center', fontsize=9,
+    ax.text(3.5, -0.21, '85.6 GB/s  |  5.7× speedup', ha='center', fontsize=9,
             color='#1E8449', fontweight='bold')
 
     plt.suptitle('Memory Access Pattern: Uncoalesced vs. Coalesced GEMV',

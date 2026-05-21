@@ -51,22 +51,18 @@ xs = [4, 5]
 ys = [0.446, 0.584]
 ax2.plot(xs, ys, marker='D', color=line_color, markersize=5,
          linewidth=1.5, linestyle='--', zorder=3, label='Energy eff. (tok/J)')
-ax2.text(4, 0.446 - 0.06, '0.446', ha='center', va='top',
-         fontsize=7, color=line_color)
-ax2.text(5, 0.584 + 0.03, '0.584', ha='center', va='bottom',
-         fontsize=7, color=line_color)
 ax2.set_ylabel('Energy efficiency (tok/J)', color=line_color)
 ax2.set_ylim(0, 0.75)
 ax2.tick_params(axis='y', colors=line_color)
 
 ax2.annotate('+31% tok/J\n(same 76.7 W)',
-             xy=(4.5, 0.515), xytext=(2.6, 0.64),
+             xy=(4.5, 0.515), xytext=(2.8, 0.64),
              fontsize=7, color=line_color,
              arrowprops=dict(arrowstyle='->', color=line_color, lw=0.8))
 
-# Power note — bottom right, away from data
-ax1.text(0.99, 0.03, 'GPU power: 76.7 W ±4.2 W',
-         transform=ax1.transAxes, fontsize=6.5, va='bottom', ha='right',
+# Power note — inside plot area at lower center, below bars 1-4
+ax1.text(0.50, 0.03, 'GPU power: 76.7 W ±4.2 W',
+         transform=ax1.transAxes, fontsize=6.5, va='bottom', ha='center',
          bbox=dict(boxstyle='round,pad=0.2', facecolor='#fffff0',
                    edgecolor='#ccc', alpha=0.9))
 

@@ -80,12 +80,12 @@ However, existing works focus primarily on maximizing end-to-end throughput---ei
 
 Fig.~\ref{fig:architecture} presents the overall architecture of MiniLlama-Infra. The system comprises three layers: host-side model loading via memory-mapped I/O, a pre-allocated GPU VRAM pool containing all model weights and inference buffers, and the optimized Transformer compute pipeline with three targeted optimization points.
 
-\begin{figure}[htbp]
+\begin{figure*}[t]
     \centering
-    \includegraphics[width=\columnwidth, trim=0 120 0 120, clip]{Fig0_Architecture_v2.pdf}
-    \caption{System architecture of MiniLlama-Infra. Colored modules indicate optimization points: warp-level cooperative INT8 GEMV (red), fused attention in shared memory (green), and fused Add+RMSNorm (blue). The decode loop streams token IDs from host to device and returns logits for sampling.}
+    \includegraphics[width=\textwidth]{Fig0_Architecture_v2.pdf}
+    \caption{System architecture of MiniLlama-Infra. Left: host-side memory-mapped model loading. Center: pre-allocated GPU VRAM pool and the 16-layer Transformer decode pipeline, with four optimization points highlighted: \textbf{Opt~1/4} (red, warp-level coalesced INT8 GEMV + dp4a W8A8 SIMD), \textbf{Opt~2} (purple, fused Add+RMSNorm), \textbf{Opt~3} (teal, fused attention). Right: six-stage optimization roadmap and cross-architecture/cross-scale validation scope.}
     \label{fig:architecture}
-\end{figure}
+\end{figure*}
 
 \subsection{Model Loading and Weight Layout}
 The Llama-3.2-1B model~\cite{meta2024llama3} is serialized into a custom binary format. The file begins with a 28-byte header encoding the model configuration (dimensions, layer count, head count, vocabulary size), followed by contiguous weight data. We use memory-mapped I/O to map the entire file into the host address space without copying, enabling zero-copy pointer arithmetic to locate each weight tensor.
