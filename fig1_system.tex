@@ -96,7 +96,7 @@
     \node[stagebox, fill=gray!8, below=1mm of s1] (s2) {S2 Naive INT8 \,\textbar\, 16.1};
     \node[stagebox, fill=red!10, draw=red!60, below=1mm of s2] (s3) {S3 Warp-Opt \,\textbar\, \textbf{31.8 (2.1$\times$)}};
     \node[stagebox, fill=violet!10, draw=violet!60, below=1mm of s3] (s4) {S4 +Fused Ops \,\textbar\, 30.0};
-    \node[stagebox, fill=teal!12, draw=teal!60, below=1mm of s4] (s5) {S5 +Flash Attn \,\textbar\, 35.2};
+    \node[stagebox, fill=teal!12, draw=teal!60, below=1mm of s4] (s5) {S5 +Fused Attn \,\textbar\, 35.2};
     \node[stagebox, fill=red!18, draw=red!70, line width=1pt, below=1mm of s5] (s6) {S6 dp4a W8A8 \,\textbar\, \textbf{44.0 (2.95$\times$)}};
     \node[font=\sffamily\tiny, below=1.5mm of s6] (pplnote) {PPL 13.36 \,\textbar\, +1.2\% vs FP16};
 \end{scope}

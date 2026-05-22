@@ -20,7 +20,7 @@ mpl.rcParams.update({
 })
 
 stages = ['FP32\nBaseline', 'Naive\nINT8', 'Warp-Opt\nINT8',
-          '+Fused\nOps', '+Flash\nAttn', '+dp4a\nW8A8']
+          '+Fused\nOps', '+Fused\nAttn', '+dp4a\nW8A8']
 # S4/S5 inherit S3 memory throughput; S6 is compute-bound (<3 GB/s)
 mem_bw     = [58.1, 19.2, 85.6, 85.6, 85.6, 3.2]
 throughput = [14.9, 16.1, 31.8, 30.0, 35.2, 44.0]

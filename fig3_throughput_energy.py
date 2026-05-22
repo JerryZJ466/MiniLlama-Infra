@@ -21,7 +21,7 @@ mpl.rcParams.update({
 })
 
 stages = ['S1\nFP32', 'S2\nNaive\nINT8', 'S3\nWarp-Opt', 'S4\n+Fused\nOps',
-          'S5\n+Flash\nAttn', 'S6\ndp4a\nW8A8']
+          'S5\n+Fused\nAttn', 'S6\ndp4a\nW8A8']
 throughput = [14.9, 16.1, 31.8, 30.0, 35.2, 44.0]
 energy = [None, None, None, None, 0.446, 0.584]
 
