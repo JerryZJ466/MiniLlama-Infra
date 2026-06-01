@@ -1,4 +1,13 @@
 
+# IDE / Editor
+.vscode/
+.idea/
+
+# Paper source and compiled PDFs (kept out of repo during blind review)
+*.tex
+*.pdf
+*.out
+
 # Model weights and binary data
 *.bin
 *.gguf
